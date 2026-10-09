@@ -1,0 +1,23 @@
+* { box-sizing: border-box; }
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: #081014;
+  font-family: Manrope, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+a {
+  font-family: inherit;
+}
+
+::selection {
+  background: #9ef01a;
+  color: #081014;
+}

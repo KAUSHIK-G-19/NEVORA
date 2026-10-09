@@ -1,0 +1,12 @@
+.git
+.gitignore
+.venv
+Nivora/node_modules
+Nivora/.angular
+Nivora/dist
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+*.log

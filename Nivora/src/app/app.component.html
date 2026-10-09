@@ -1,0 +1,121 @@
+<main [class.hmi-view-active]="activeView === 'hmi-only'">
+  <!-- Navigation Header with View Switcher -->
+  <header class="navbar-wrapper">
+    <nav class="navbar shell" aria-label="Main navigation">
+      <a class="brand" href="#top" (click)="switchToFullView()" aria-label="Nevora home">
+        <span class="brand-mark"><i></i><i></i><i></i></span>
+        <span>NEVORA</span>
+      </a>
+
+      <div class="nav-links">
+        <button type="button" class="nav-tab-btn" [class.active]="activeView === 'full'" (click)="switchToFullView()">
+          Twin Overview
+        </button>
+        <button type="button" class="nav-tab-btn" [class.active]="activeView === 'hmi-only'" (click)="switchToHmiOnly()">
+          Battery HMI Dashboard <span class="live-dot"></span>
+        </button>
+        <a *ngIf="activeView === 'full'" href="#features">Features</a>
+        <a *ngIf="activeView === 'full'" href="#architecture">Architecture</a>
+      </div>
+
+      <div class="nav-actions">
+        <button *ngIf="activeView === 'full'" class="nav-cta" type="button" (click)="scrollToHmi()">
+          Launch HMI <span>↓</span>
+        </button>
+        <button *ngIf="activeView === 'hmi-only'" class="nav-cta-secondary" type="button" (click)="switchToFullView()">
+          Return to Overview <span>↖</span>
+        </button>
+      </div>
+    </nav>
+  </header>
+
+  <!-- Hero & 3D Digital Twin (Visible in Full View) -->
+  <section class="hero" id="top" *ngIf="activeView === 'full'">
+    <div class="grid-glow"></div>
+    <div class="noise"></div>
+
+    <div class="hero-inner shell">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="eyebrow-line"></span>EV BATTERY INTELLIGENCE / 01</div>
+        <h1>Make every<br><em>charge count.</em></h1>
+        <p>NEVORA turns battery behavior into a live advantage, with physics-informed intelligence at the edge.</p>
+        <div class="hero-actions">
+          <button class="primary-btn" type="button" (click)="scrollToHmi()">Launch Battery HMI <span>↓</span></button>
+          <button class="ghost-btn" type="button" (click)="switchToHmiOnly()">Fullscreen Battery UI <span>↗</span></button>
+        </div>
+      </div>
+
+      <div class="stage-wrap" #modelStage>
+        <app-three-canvas></app-three-canvas>
+        <div class="stage-label stage-label-top"><span class="pulse"></span>NEVORA / TWIN UNIT <b>v2.4.1</b></div>
+        <div class="orbit-label orbit-label-top">LIVE TELEMETRY <span>●</span></div>
+        <div class="orbit-label orbit-label-bottom">CAN-BUS <span>CONNECTED</span></div>
+        <div class="metric-card metric-soh"><span class="metric-kicker">State of health</span><strong>98.4<span>%</span></strong><small><i></i> +0.8% this cycle</small></div>
+        <div class="metric-card metric-rul"><span class="metric-kicker">Remaining useful life</span><strong>1,240 <span>cycles</span></strong><small>CONFIDENCE <b>97.8%</b></small></div>
+        <div class="metric-card metric-risk"><span class="metric-kicker">Degradation risk</span><strong><i></i>Low <span>0.04</span></strong><small>WITHIN NOMINAL RANGE</small></div>
+        <div class="connector connector-left"></div><div class="connector connector-right"></div>
+      </div>
+    </div>
+
+    <div class="hero-footer shell">
+      <span>01 / 04</span>
+      <span class="scroll-cue" (click)="scrollToHmi()"><i></i> Scroll down to Battery HMI</span>
+      <span>EST. 2026 / CALIFORNIA</span>
+    </div>
+    <div class="data-ticker">
+      <div><span>BATTERY PACK / 04</span><b>● ONLINE</b></div>
+      <div><span>THERMAL STATE</span><strong>31.8°C</strong></div>
+      <div><span>CHARGE VELOCITY</span><strong>+12.4 kW</strong></div>
+      <div><span>MODEL LATENCY</span><strong>4.2 ms</strong></div>
+    </div>
+  </section>
+
+  <!-- Dedicated Battery-Format UI Dashboard Section -->
+  <section class="battery-hmi-section" id="battery-hmi-section">
+    <div class="shell section-heading" *ngIf="activeView === 'full'">
+      <span class="section-index">02 / BATTERY HMI DASHBOARD</span>
+      <h2>800V Physical Pack<br><em>Telemetry & Controls</em></h2>
+      <p class="section-subtext">
+        Interactive battery-format interface with real-time cell balancing, dynamic charge curves, 
+        and Angular.js runtime integration.
+      </p>
+    </div>
+
+    <!-- The Battery-Format Dashboard Component -->
+    <app-battery-dashboard></app-battery-dashboard>
+  </section>
+
+  <!-- Signal & Intelligence Section (in Full View) -->
+  <section class="signal-section" id="features" *ngIf="activeView === 'full'">
+    <div class="shell signal-grid">
+      <div><span class="section-index">03 / THE SIGNAL</span><h2>Every cell.<br><em>Understood.</em></h2></div>
+      <div class="signal-copy"><p>NEVORA transforms raw battery telemetry into a living, predictive model. No black boxes. Just a clear view of what's happening beneath the surface.</p><a href="#architecture" class="arrow-link">The intelligence layer <span>↗</span></a></div>
+    </div>
+    <div class="feature-rail shell">
+      <article><span class="feature-num">01</span><h3>Physics-informed</h3><p>Electrochemical models paired with machine learning for predictions you can trust.</p></article>
+      <article><span class="feature-num">02</span><h3>Edge-native</h3><p>Inference in milliseconds, right where the signal starts. No cloud dependency.</p></article>
+      <article><span class="feature-num">03</span><h3>Always learning</h3><p>Every cycle makes the twin more precise, adapting to your battery's unique fingerprint.</p></article>
+    </div>
+  </section>
+
+  <!-- Architecture Section (in Full View) -->
+  <section class="architecture-section" id="architecture" *ngIf="activeView === 'full'">
+    <div class="shell architecture-content">
+      <span class="section-index">04 / THE ARCHITECTURE</span>
+      <h2>From electrons<br>to <em>insight.</em></h2>
+      <p>A miniature intelligence layer that lives between your cells and your decisions.</p>
+      <div class="architecture-line">
+        <span>Cell signal</span><i></i><span>NEVORA CORE</span><i></i><span>Actionable insight</span>
+      </div>
+    </div>
+  </section>
+
+  <footer class="shell footer" id="demo">
+    <a class="brand" href="#top" (click)="switchToFullView()">
+      <span class="brand-mark"><i></i><i></i><i></i></span>
+      <span>NEVORA</span>
+    </a>
+    <span>Digital twins for a charged future. Powered by Angular & AngularJS.</span>
+    <span>© 2026</span>
+  </footer>
+</main>

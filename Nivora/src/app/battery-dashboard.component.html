@@ -1,0 +1,334 @@
+<div class="battery-hmi-container">
+  <!-- Top System Status & Framework Interoperability Bar -->
+  <header class="hmi-top-bar">
+    <div class="hmi-brand">
+      <div class="battery-logo-icon">
+        <span class="batt-cap"></span>
+        <span class="batt-body"><i></i></span>
+      </div>
+      <div>
+        <h2>NEVORA BMS INTELLIGENCE</h2>
+        <p class="subtitle">PHYSICS-INFORMED NEURAL NETWORK // 800V BATTERY PACK DIGITAL TWIN</p>
+      </div>
+    </div>
+
+    <div class="framework-badges">
+      <div class="badge-item angular-badge">
+        <span class="framework-dot green"></span>
+        <span class="lbl">Angular Framework</span>
+        <strong>v{{ angularVersion }}</strong>
+      </div>
+      <div class="badge-item angularjs-badge">
+        <span class="framework-dot cyan"></span>
+        <span class="lbl">AngularJS Engine</span>
+        <strong>v{{ angularJsVersion }} (Active)</strong>
+      </div>
+      <div class="badge-item can-badge">
+        <span class="framework-dot pulse-lime"></span>
+        <span class="lbl">CAN Bus</span>
+        <strong>can0 @ 250 kbps</strong>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Battery Pack Chassis Enclosure -->
+  <div class="battery-pack-chassis" [class.charging-mode]="currentMode === 'charge'" [class.fault-mode]="isFaultInjected">
+    <!-- Outer Terminal Lugs & High-Voltage Warning Header -->
+    <div class="chassis-header-bar">
+      <!-- Cathode Positive Terminal -->
+      <div class="terminal-unit positive-terminal">
+        <div class="terminal-post">
+          <span class="terminal-symbol">+</span>
+          <div class="arc-glow"></div>
+        </div>
+        <div class="terminal-meta">
+          <span class="term-name">HV+ CATHODE</span>
+          <strong>+{{ (packVoltage / 2).toFixed(1) }}V DC</strong>
+          <span class="flow-indicator" *ngIf="currentMode === 'charge' || currentMode === 'regen'">
+            <i class="flow-arrow flow-in">▼</i> INFLOW
+          </span>
+          <span class="flow-indicator" *ngIf="currentMode === 'drive' || currentMode === 'ludicrous'">
+            <i class="flow-arrow flow-out">▲</i> DRAIN
+          </span>
+        </div>
+      </div>
+
+      <!-- Center Casing Status Plate -->
+      <div class="casing-status-plate">
+        <div class="safety-hazard-strip"></div>
+        <div class="pack-id-block">
+          <span class="plate-code">PACK SPEC // 800V 100kWh NMC811</span>
+          <div class="casing-led-strip">
+            <span class="led" [class.active]="soc > 20"></span>
+            <span class="led" [class.active]="soc > 40"></span>
+            <span class="led" [class.active]="soc > 60"></span>
+            <span class="led" [class.active]="soc > 80"></span>
+            <span class="led alert" *ngIf="isFaultInjected">FAULT DETECTED</span>
+          </div>
+        </div>
+        <div class="cooling-port">
+          <span class="coolant-icon">❄️</span>
+          <span>LIQUID CHILLER: <b>{{ coolantFlow }} L/min</b></span>
+        </div>
+      </div>
+
+      <!-- Anode Negative Terminal -->
+      <div class="terminal-unit negative-terminal">
+        <div class="terminal-meta text-right">
+          <span class="term-name">HV- ANODE</span>
+          <strong>-{{ (packVoltage / 2).toFixed(1) }}V DC</strong>
+          <span class="flow-indicator">
+            GROUND ISOLATED
+          </span>
+        </div>
+        <div class="terminal-post">
+          <span class="terminal-symbol">-</span>
+          <div class="arc-glow cyan-arc"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Central Battery Energy Core (Large Visual Battery Cell) -->
+    <div class="battery-core-display">
+      <div class="giant-battery-tank">
+        <div class="tank-casing">
+          <!-- Terminal connector top -->
+          <div class="tank-terminal-nub"></div>
+          
+          <!-- Liquid / Segmented Energy Fill -->
+          <div class="tank-fluid-wrap">
+            <div class="tank-liquid" [style.height.%]="soc" [class.warning-level]="soc <= 20" [class.charging-pulse]="currentMode === 'charge'">
+              <div class="liquid-wave wave-1"></div>
+              <div class="liquid-wave wave-2"></div>
+              <div class="energy-bubbles">
+                <span></span><span></span><span></span><span></span>
+              </div>
+            </div>
+
+            <!-- Segmented Tick Lines Overlay -->
+            <div class="tank-segments-overlay">
+              <span *ngFor="let s of [100, 90, 80, 70, 60, 50, 40, 30, 20, 10]" class="segment-tick">
+                <i class="tick-mark"></i>
+                <small>{{ s }}%</small>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Giant Battery Center Readout -->
+        <div class="tank-center-readout">
+          <div class="soc-headline">
+            <span class="soc-label">STATE OF CHARGE</span>
+            <div class="soc-big-number">
+              <strong>{{ soc.toFixed(1) }}</strong>
+              <span class="percent-sign">%</span>
+            </div>
+          </div>
+
+          <div class="tank-sub-metrics">
+            <div class="sub-metric">
+              <span class="lbl">USABLE ENERGY</span>
+              <strong>{{ currentKwh }} <small>/ {{ totalCapacityKwh }} kWh</small></strong>
+            </div>
+            <div class="sub-metric">
+              <span class="lbl">EST. RANGE</span>
+              <strong>{{ estimatedRangeKm }} <small>km</small></strong>
+            </div>
+            <div class="sub-metric">
+              <span class="lbl">CURRENT POWER</span>
+              <strong [class.power-pos]="powerKw > 0" [class.power-neg]="powerKw < 0">
+                {{ powerKw > 0 ? '+' : '' }}{{ powerKw }} <small>kW</small>
+              </strong>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quick Operational Mode Switcher Toolbar -->
+      <div class="battery-control-deck">
+        <div class="deck-title">OPERATION MODE SELECTOR</div>
+        <div class="mode-buttons-grid">
+          <button class="mode-btn" [class.active]="currentMode === 'charge'" (click)="setMode('charge')">
+            <span class="mode-icon">⚡</span>
+            <span class="mode-title">DC Fast Charge</span>
+            <small>+120A Inflow</small>
+          </button>
+          <button class="mode-btn" [class.active]="currentMode === 'drive'" (click)="setMode('drive')">
+            <span class="mode-icon">🚗</span>
+            <span class="mode-title">Dynamic Drive</span>
+            <small>-25A Cruising</small>
+          </button>
+          <button class="mode-btn" [class.active]="currentMode === 'ludicrous'" (click)="setMode('ludicrous')">
+            <span class="mode-icon">🚀</span>
+            <span class="mode-title">Ludicrous Launch</span>
+            <small>-185A Max Sag</small>
+          </button>
+          <button class="mode-btn" [class.active]="currentMode === 'regen'" (click)="setMode('regen')">
+            <span class="mode-icon">🔄</span>
+            <span class="mode-title">Regenerative</span>
+            <small>Kinetic Recovery</small>
+          </button>
+          <button class="mode-btn" [class.active]="currentMode === 'balance'" (click)="setMode('balance')">
+            <span class="mode-icon">⚖️</span>
+            <span class="mode-title">Cell Balancer</span>
+            <small>Delta-V Shunt</small>
+          </button>
+        </div>
+
+        <div class="fault-test-bar">
+          <button class="fault-btn" [class.danger-active]="isFaultInjected" (click)="toggleFaultInjection()">
+            <span class="fault-led"></span>
+            {{ isFaultInjected ? 'RECOVER CELL ANOMALY' : 'INJECT CELL THERMAL / V-SAG FAULT' }}
+          </button>
+          <span class="fault-hint">
+            Demonstrates NEVORA Physics-Informed Neural Network detecting internal degradation before hardware BMS trip.
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Battery Cell Matrix (Modules & 32 Individual Cells) -->
+    <div class="battery-modules-section">
+      <div class="modules-header">
+        <div class="section-title-wrap">
+          <h3>CELL MATRIX ARCHITECTURE</h3>
+          <span class="tag">4 MODULES // 32 CELLS SERIES-PARALLEL</span>
+        </div>
+        <div class="module-filter-tabs">
+          <button [class.active]="activeModuleFilter === 'ALL'" (click)="activeModuleFilter = 'ALL'">ALL CELLS (32)</button>
+          <button [class.active]="activeModuleFilter === 'MOD-A'" (click)="activeModuleFilter = 'MOD-A'">MODULE A</button>
+          <button [class.active]="activeModuleFilter === 'MOD-B'" (click)="activeModuleFilter = 'MOD-B'">MODULE B</button>
+          <button [class.active]="activeModuleFilter === 'MOD-C'" (click)="activeModuleFilter = 'MOD-C'">MODULE C</button>
+          <button [class.active]="activeModuleFilter === 'MOD-D'" (click)="activeModuleFilter = 'MOD-D'">MODULE D</button>
+        </div>
+      </div>
+
+      <div class="cells-grid-layout">
+        <div 
+          *ngFor="let cell of filteredCells" 
+          class="cell-capsule" 
+          [class.cell-selected]="selectedCell?.id === cell.id"
+          [class.cell-warning]="cell.status === 'warning'"
+          [class.cell-critical]="cell.status === 'critical'"
+          (click)="selectCell(cell)"
+        >
+          <!-- Cylindrical Cell Terminal Head -->
+          <div class="cell-top-cap">
+            <span class="cap-nub"></span>
+            <span class="balance-dot" *ngIf="cell.balancing" title="Balancing Active"></span>
+          </div>
+          <!-- Cell Body -->
+          <div class="cell-canister">
+            <div class="cell-id">C{{ cell.id < 10 ? '0' + cell.id : cell.id }}</div>
+            <div class="cell-voltage">{{ cell.voltage }}<small>V</small></div>
+            <div class="cell-temp-bar">
+              <span class="temp-indicator" [style.width.%]="(cell.temp / 60) * 100"></span>
+            </div>
+            <div class="cell-temp-text">{{ cell.temp }}°C</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Lower Deck: Cell Deep Inspector & PINN Neural Telemetry -->
+    <div class="lower-telemetry-deck">
+      <!-- Selected Cell Deep Diagnostics -->
+      <div class="cell-detail-inspector" *ngIf="selectedCell">
+        <div class="deck-card-header">
+          <h4>ELECTROCHEMICAL INSPECTOR // CELL #{{ selectedCell.id < 10 ? '0' + selectedCell.id : selectedCell.id }}</h4>
+          <span class="status-pill" [class.pill-optimal]="selectedCell.status === 'optimal'" [class.pill-critical]="selectedCell.status === 'critical'">
+            {{ selectedCell.status | uppercase }}
+          </span>
+        </div>
+        <div class="inspector-grid">
+          <div class="insp-item">
+            <span class="lbl">Assigned Module</span>
+            <strong>{{ selectedCell.moduleId }}</strong>
+          </div>
+          <div class="insp-item">
+            <span class="lbl">Terminal Voltage</span>
+            <strong [class.crit-text]="selectedCell.status === 'critical'">{{ selectedCell.voltage }} V</strong>
+          </div>
+          <div class="insp-item">
+            <span class="lbl">Core Temperature</span>
+            <strong [class.crit-text]="selectedCell.status === 'critical'">{{ selectedCell.temp }} °C</strong>
+          </div>
+          <div class="insp-item">
+            <span class="lbl">Internal Resistance</span>
+            <strong>{{ selectedCell.impedance }} mΩ</strong>
+          </div>
+          <div class="insp-item">
+            <span class="lbl">Capacity Retention</span>
+            <strong>{{ selectedCell.soh }}%</strong>
+          </div>
+          <div class="insp-item">
+            <span class="lbl">Balancing Shunt</span>
+            <strong>{{ selectedCell.balancing ? 'ENGAGED' : 'PASSIVE' }}</strong>
+          </div>
+        </div>
+      </div>
+
+      <!-- PINN Physics Engine & Health Metrics -->
+      <div class="pinn-hud-card">
+        <div class="deck-card-header">
+          <h4>PINN DIGITAL TWIN CO-PROCESSOR</h4>
+          <span class="neural-chip">ONNX RUNTIME</span>
+        </div>
+        <div class="pinn-metrics-grid">
+          <div class="pinn-stat">
+            <span class="lbl">State of Health (SOH)</span>
+            <div class="bar-and-val">
+              <strong>{{ soh }}%</strong>
+              <div class="mini-bar"><span [style.width.%]="soh"></span></div>
+            </div>
+          </div>
+          <div class="pinn-stat">
+            <span class="lbl">Remaining Useful Life (RUL)</span>
+            <div class="bar-and-val">
+              <strong>{{ rulCycles }} <small>cycles</small></strong>
+              <small class="hint">~{{ (rulCycles * 320).toLocaleString() }} km</small>
+            </div>
+          </div>
+          <div class="pinn-stat">
+            <span class="lbl">Degradation Risk</span>
+            <div class="bar-and-val">
+              <strong [class.crit-text]="degradationRisk > 0.3">{{ degradationRisk }}</strong>
+              <span class="risk-badge" [class.risk-low]="degradationRisk <= 0.1" [class.risk-high]="degradationRisk > 0.1">
+                {{ degradationRisk <= 0.1 ? 'NOMINAL' : 'HIGH RISK' }}
+              </span>
+            </div>
+          </div>
+          <div class="pinn-stat">
+            <span class="lbl">Inference Latency</span>
+            <div class="bar-and-val">
+              <strong>{{ pinnLatency }} ms</strong>
+              <small class="hint">Edge-Inference Active</small>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live Decoded CAN Bus Stream (from can_reader.cpp) -->
+      <div class="can-stream-card">
+        <div class="deck-card-header">
+          <h4>CAN-BUS PACKET DECODER</h4>
+          <span class="live-pulse-dot">LIVE</span>
+        </div>
+        <div class="can-log-table">
+          <div class="can-row can-head">
+            <span>TIMESTAMP</span>
+            <span>CAN ID</span>
+            <span>TYPE</span>
+            <span>PAYLOAD (HEX)</span>
+          </div>
+          <div *ngFor="let pkt of rawCanPackets" class="can-row">
+            <span class="mono-dim">{{ pkt.time }}</span>
+            <span class="can-id-text">{{ pkt.id }}</span>
+            <span class="can-type-tag">{{ pkt.type }}</span>
+            <span class="mono-payload">{{ pkt.data }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

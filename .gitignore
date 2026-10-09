@@ -1,0 +1,31 @@
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Node & Frontend
+node_modules/
+Nivora/node_modules/
+Nivora/.angular/
+Nivora/dist/
+dist/
+.angular/
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+bin/
+*.log
