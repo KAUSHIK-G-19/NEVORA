@@ -1,22 +1,30 @@
 """
-NEVORA BMS INTELLIGENCE // 800V PINN DIGITAL TWIN
-Driver Instrument Cockpit & Battery Management System
-Supports: ☀️ Driver Daylight (Crisp White) & 🌙 Night (Dark) Themes
+NEVORA BMS INTELLIGENCE // 800V PINN DIGITAL TWIN & REAL-TIME TELEMETRY COCKPIT
+Supports: ⚡ High-Speed UDP Receiver (Port 4210) & 🟢 MQTT Pipeline (broker.hivemq.com)
+Dynamic 500ms Partial Rendering via Streamlit Fragments (Zero Page Reloads)
 """
 
+import collections
+from datetime import datetime
+import json
 import math
 import os
+import random
+import socket
+import threading
 import time
-from datetime import datetime
+
 import numpy as np
+import paho.mqtt.client as mqtt
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 # Configure page layout and metadata
 st.set_page_config(
-    page_title="NEVORA Driver Cockpit & PINN Digital Twin",
+    page_title="NEVORA EV Battery Digital Twin Dashboard",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -26,14 +34,321 @@ st.set_page_config(
 # Theme State Management (Light vs Dark)
 # ---------------------------------------------------------
 if "theme_mode" not in st.session_state:
-    st.session_state["theme_mode"] = "light"  # Default to user-requested clean white driver theme
+    st.session_state["theme_mode"] = "light"  # Default to clean white driver theme
+
+# ---------------------------------------------------------
+# 1. Thread-Safe UDP Telemetry Manager (Port 4210)
+# ---------------------------------------------------------
+class UdpTelemetryManager:
+    """Thread-safe UDP listener singleton receiving high-speed ESP32 packets on port 4210."""
+
+    def __init__(self, ip="0.0.0.0", port=4210):
+        self.ip = ip
+        self.port = port
+        self.lock = threading.Lock()
+        self.running = True
+        self.connected = False
+        self.last_packet_time = 0.0
+        self.packet_count = 0
+        self.last_sender = "None"
+        self.sock = None
+
+        self.latest_data = {
+            "packVoltage": 792.40,
+            "packCurrent": -34.80,
+            "cellTemp": 31.20,
+            "SoC": 82.50,
+            "SoH": 98.40,
+            "timestamp": time.time(),
+            "raw_json": '{"v": 792.4, "i": -34.8, "t": 31.2, "soc": 82.5, "soh": 98.4}',
+            "sender": "None",
+            "source": "Awaiting ESP32 UDP Broadcast",
+        }
+
+        self.history = collections.deque(maxlen=60)
+        now = time.time()
+        for idx in range(20):
+            t_offset = now - (20 - idx) * 0.5
+            self.history.append({
+                "time": datetime.fromtimestamp(t_offset).strftime("%H:%M:%S.%f")[:-4],
+                "timestamp": t_offset,
+                "packVoltage": 792.4 + math.sin(idx * 0.4) * 1.5,
+                "packCurrent": -34.8 + math.cos(idx * 0.4) * 8.0,
+                "cellTemp": 31.2 + idx * 0.02,
+                "SoC": 82.5 - idx * 0.01,
+                "SoH": 98.4,
+            })
+
+        self.thread = threading.Thread(target=self._udp_worker, daemon=True)
+        self.thread.start()
+
+    def _udp_worker(self):
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.sock.bind((self.ip, self.port))
+            self.sock.settimeout(1.0)
+            self.connected = True
+            print(f"[UDP] Listening for ESP32 packets on {self.ip}:{self.port}...")
+        except Exception as e:
+            self.connected = False
+            print(f"[UDP ERROR] Could not bind to {self.ip}:{self.port}: {e}")
+            return
+
+        while self.running:
+            try:
+                data, addr = self.sock.recvfrom(1024)
+                raw_str = data.decode("utf-8", errors="ignore")
+                telemetry = json.loads(raw_str)
+
+                # Parse JSON payload supporting both compact keys ('v', 'i', 't', 'soc') and standard names
+                v = float(telemetry.get("v", telemetry.get("packVoltage", self.latest_data["packVoltage"])))
+                i = float(telemetry.get("i", telemetry.get("packCurrent", self.latest_data["packCurrent"])))
+                t = float(telemetry.get("t", telemetry.get("cellTemp", self.latest_data["cellTemp"])))
+                soc = float(telemetry.get("soc", telemetry.get("SoC", self.latest_data["SoC"])))
+                soh = float(telemetry.get("soh", telemetry.get("SoH", self.latest_data["SoH"])))
+
+                with self.lock:
+                    now = time.time()
+                    self.packet_count += 1
+                    self.last_packet_time = now
+                    self.last_sender = f"{addr[0]}:{addr[1]}"
+                    self.latest_data = {
+                        "packVoltage": v,
+                        "packCurrent": i,
+                        "cellTemp": t,
+                        "SoC": soc,
+                        "SoH": soh,
+                        "timestamp": now,
+                        "raw_json": raw_str,
+                        "sender": self.last_sender,
+                        "source": f"UDP ESP32 ({self.last_sender})",
+                    }
+                    self.history.append({
+                        "time": datetime.fromtimestamp(now).strftime("%H:%M:%S.%f")[:-4],
+                        "timestamp": now,
+                        "packVoltage": v,
+                        "packCurrent": i,
+                        "cellTemp": t,
+                        "SoC": soc,
+                        "SoH": soh,
+                    })
+            except socket.timeout:
+                continue
+            except Exception as e:
+                continue
+
+    def push_simulated_packet(self, v, i, t, soc, soh):
+        with self.lock:
+            now = time.time()
+            self.packet_count += 1
+            self.last_packet_time = now
+            self.last_sender = "127.0.0.1:4210 (In-App Mock)"
+            raw_dict = {
+                "v": round(v, 2),
+                "i": round(i, 2),
+                "t": round(t, 2),
+                "soc": round(soc, 2),
+                "soh": round(soh, 2),
+            }
+            raw_str = json.dumps(raw_dict)
+            self.latest_data = {
+                "packVoltage": raw_dict["v"],
+                "packCurrent": raw_dict["i"],
+                "cellTemp": raw_dict["t"],
+                "SoC": raw_dict["soc"],
+                "SoH": raw_dict["soh"],
+                "timestamp": now,
+                "raw_json": raw_str,
+                "sender": self.last_sender,
+                "source": "In-Dashboard Mock Generator",
+            }
+            self.history.append({
+                "time": datetime.fromtimestamp(now).strftime("%H:%M:%S.%f")[:-4],
+                "timestamp": now,
+                "packVoltage": raw_dict["v"],
+                "packCurrent": raw_dict["i"],
+                "cellTemp": raw_dict["t"],
+                "SoC": raw_dict["soc"],
+                "SoH": raw_dict["soh"],
+            })
+
+    def get_snapshot(self):
+        with self.lock:
+            return (
+                dict(self.latest_data),
+                list(self.history),
+                self.connected,
+                self.packet_count,
+                self.last_packet_time,
+                self.last_sender,
+            )
+
+@st.cache_resource
+def get_udp_manager():
+    return UdpTelemetryManager(ip="0.0.0.0", port=4210)
+
+udp_mgr = get_udp_manager()
+
+# ---------------------------------------------------------
+# 2. Thread-Safe MQTT Telemetry Manager (Paho-MQTT 2.x/1.x)
+# ---------------------------------------------------------
+class MqttTelemetryManager:
+    """Thread-safe MQTT subscriber singleton bridging HiveMQ to Streamlit."""
+
+    def __init__(self, broker="broker.hivemq.com", port=1883, topic="nevora/battery/telemetry"):
+        self.broker = broker
+        self.port = port
+        self.topic = topic
+        self.lock = threading.Lock()
+        self.connected = False
+        self.last_packet_time = 0.0
+        self.packet_count = 0
+        self.client_id = f"nevora-web-{int(time.time()*1000)%100000}"
+
+        self.latest_data = {
+            "packVoltage": 792.40,
+            "packCurrent": -34.80,
+            "cellTemp": 31.20,
+            "SoC": 82.50,
+            "SoH": 98.40,
+            "timestamp": time.time(),
+            "raw_json": '{"packVoltage": 792.4, "packCurrent": -34.8, "cellTemp": 31.2, "SoC": 82.5, "SoH": 98.4}',
+            "source": "Awaiting ESP32 MQTT Broadcast",
+        }
+
+        self.history = collections.deque(maxlen=60)
+        now = time.time()
+        for idx in range(20):
+            t_offset = now - (20 - idx) * 0.5
+            self.history.append({
+                "time": datetime.fromtimestamp(t_offset).strftime("%H:%M:%S.%f")[:-4],
+                "timestamp": t_offset,
+                "packVoltage": 792.4 + math.sin(idx * 0.4) * 1.5,
+                "packCurrent": -34.8 + math.cos(idx * 0.4) * 8.0,
+                "cellTemp": 31.2 + idx * 0.02,
+                "SoC": 82.5 - idx * 0.01,
+                "SoH": 98.4,
+            })
+
+        self.client = None
+        self._start_client()
+
+    def _start_client(self):
+        try:
+            if hasattr(mqtt, "CallbackAPIVersion"):
+                self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=self.client_id)
+            else:
+                self.client = mqtt.Client(client_id=self.client_id)
+
+            self.client.on_connect = self._on_connect
+            self.client.on_disconnect = self._on_disconnect
+            self.client.on_message = self._on_message
+
+            self.client.connect_async(self.broker, self.port, keepalive=60)
+            self.client.loop_start()
+        except Exception as e:
+            print(f"[MQTT ERROR] Initialization failure: {e}")
+
+    def _on_connect(self, client, userdata, flags, rc, properties=None):
+        if rc == 0:
+            self.connected = True
+            client.subscribe(self.topic)
+        else:
+            self.connected = False
+
+    def _on_disconnect(self, client, userdata, disconnect_flags_or_rc, properties=None):
+        self.connected = False
+
+    def _on_message(self, client, userdata, message):
+        try:
+            payload_str = message.payload.decode("utf-8")
+            data = json.loads(payload_str)
+            with self.lock:
+                now = time.time()
+                self.packet_count += 1
+                self.last_packet_time = now
+
+                v = float(data.get("packVoltage", data.get("v", self.latest_data["packVoltage"])))
+                i = float(data.get("packCurrent", data.get("i", self.latest_data["packCurrent"])))
+                t = float(data.get("cellTemp", data.get("t", self.latest_data["cellTemp"])))
+                soc = float(data.get("SoC", data.get("soc", self.latest_data["SoC"])))
+                soh = float(data.get("SoH", data.get("soh", self.latest_data["SoH"])))
+
+                self.latest_data = {
+                    "packVoltage": v,
+                    "packCurrent": i,
+                    "cellTemp": t,
+                    "SoC": soc,
+                    "SoH": soh,
+                    "timestamp": now,
+                    "raw_json": payload_str,
+                    "source": "MQTT HiveMQ Stream",
+                }
+
+                self.history.append({
+                    "time": datetime.fromtimestamp(now).strftime("%H:%M:%S.%f")[:-4],
+                    "timestamp": now,
+                    "packVoltage": v,
+                    "packCurrent": i,
+                    "cellTemp": t,
+                    "SoC": soc,
+                    "SoH": soh,
+                })
+        except Exception as e:
+            print(f"[MQTT ERROR] Message parse exception: {e}")
+
+    def push_simulated_packet(self, v, i, t, soc, soh):
+        with self.lock:
+            now = time.time()
+            self.packet_count += 1
+            self.last_packet_time = now
+            raw_dict = {
+                "packVoltage": round(v, 2),
+                "packCurrent": round(i, 2),
+                "cellTemp": round(t, 2),
+                "SoC": round(soc, 2),
+                "SoH": round(soh, 2),
+            }
+            raw_str = json.dumps(raw_dict)
+            self.latest_data = {
+                **raw_dict,
+                "timestamp": now,
+                "raw_json": raw_str,
+                "source": "In-Dashboard Mock Generator",
+            }
+            self.history.append({
+                "time": datetime.fromtimestamp(now).strftime("%H:%M:%S.%f")[:-4],
+                "timestamp": now,
+                **raw_dict,
+            })
+
+    def get_snapshot(self):
+        with self.lock:
+            return (
+                dict(self.latest_data),
+                list(self.history),
+                self.connected,
+                self.packet_count,
+                self.last_packet_time,
+            )
+
+@st.cache_resource
+def get_mqtt_manager():
+    return MqttTelemetryManager(
+        broker="broker.hivemq.com",
+        port=1883,
+        topic="nevora/battery/telemetry",
+    )
+
+mqtt_mgr = get_mqtt_manager()
 
 # ---------------------------------------------------------
 # Sidebar Controls & Cockpit Configuration
 # ---------------------------------------------------------
 with st.sidebar:
     st.markdown("### 🏎️ DRIVER COCKPIT CONTROLS")
-    
+
     # Theme Toggle Switch in Sidebar
     theme_choice = st.radio(
         "Display Mode",
@@ -45,8 +360,25 @@ with st.sidebar:
     st.session_state["theme_mode"] = "dark" if is_dark else "light"
 
     st.markdown("---")
+    st.markdown("#### 📡 Telemetry Source")
+
+    telemetry_source = st.radio(
+        "Select Pipeline Mode",
+        options=[
+            "⚡ Live UDP Receiver (Port 4210)",
+            "🟢 Live MQTT Pipeline (HiveMQ)",
+            "🎛️ Manual Sliders (Simulation)",
+        ],
+        index=0,
+        help="Switch between local high-speed UDP (port 4210), cloud MQTT (HiveMQ broker), or manual slider tuning.",
+    )
+    is_udp_mode = "Live UDP" in telemetry_source
+    is_mqtt_mode = "Live MQTT" in telemetry_source
+    is_manual_mode = "Manual Sliders" in telemetry_source
+
+    st.markdown("---")
     st.markdown("#### ⚙️ Drive Operating Mode")
-    
+
     mode_options = [
         ("🚗 Dynamic Drive", "drive", -24.8, 401.8, 31.4, 105),
         ("⚡ DC Fast Charge", "charge", 118.5, 412.0, 36.5, 0),
@@ -54,34 +386,88 @@ with st.sidebar:
         ("🔄 Regenerative Eco", "regen", 38.4, 405.2, 32.8, 62),
         ("⚖️ Cell Balancer", "balance", -1.2, 400.0, 29.5, 0),
     ]
-    
+
     selected_mode_label = st.selectbox(
         "Select Operating Mode",
         options=[m[0] for m in mode_options],
         index=0,
         help="Select vehicle load profile, road dynamics, and thermal cooling demand",
     )
-    
+
     active_mode = next(m for m in mode_options if m[0] == selected_mode_label)
     default_current = active_mode[2]
     default_volts = active_mode[3]
     default_temp = active_mode[4]
     default_speed = active_mode[5]
 
-    st.markdown("---")
-    st.markdown("#### ⚡ Battery Telemetry Sliders")
-    
-    col_v, col_i = st.columns(2)
-    with col_v:
-        pack_voltage = st.slider("Pack Voltage (V)", min_value=300.0, max_value=800.0, value=float(default_volts), step=0.5)
-    with col_i:
-        pack_current = st.slider("Current (A)", min_value=-300.0, max_value=250.0, value=float(default_current), step=0.5)
+    if is_manual_mode:
+        st.markdown("---")
+        st.markdown("#### ⚡ Battery Telemetry Sliders")
+        col_v, col_i = st.columns(2)
+        with col_v:
+            slider_voltage = st.slider("Pack Voltage (V)", min_value=300.0, max_value=850.0, value=float(default_volts), step=0.5)
+        with col_i:
+            slider_current = st.slider("Current (A)", min_value=-300.0, max_value=250.0, value=float(default_current), step=0.5)
 
-    col_t, col_s = st.columns(2)
-    with col_t:
-        pack_temp = st.slider("Core Temp (°C)", min_value=-20.0, max_value=75.0, value=float(default_temp), step=0.5)
-    with col_s:
-        soc = st.slider("State of Charge (%)", min_value=1.0, max_value=100.0, value=84.6, step=0.2)
+        col_t, col_s = st.columns(2)
+        with col_t:
+            slider_temp = st.slider("Core Temp (°C)", min_value=-20.0, max_value=75.0, value=float(default_temp), step=0.5)
+        with col_s:
+            slider_soc = st.slider("State of Charge (%)", min_value=1.0, max_value=100.0, value=84.6, step=0.2)
+        slider_soh = 98.4
+    elif is_udp_mode:
+        st.markdown("---")
+        st.markdown("#### ⚡ UDP Receiver Diagnostics")
+        st.caption("Active UDP Socket: `0.0.0.0:4210`")
+        st.markdown(
+            f"""
+            • **Listening IP:** `0.0.0.0` (All interfaces)<br>
+            • **Port:** `4210`<br>
+            • **Socket Status:** <b style="color: {'#16a34a' if udp_mgr.connected else '#dc2626'};">{'Bound & Listening' if udp_mgr.connected else 'Bind Error'}</b><br>
+            • **Expected Keys:** `v`, `i`, `t`, `soc`
+            """,
+            unsafe_allow_html=True,
+        )
+
+        sim_udp_toggle = st.toggle(
+            "🧪 Run In-App Mock UDP Stream",
+            value=False,
+            help="Generates synthetic 500ms battery packets internally into the UDP pipeline to preview live gauges and graphs.",
+        )
+        if sim_udp_toggle:
+            t_now = time.time()
+            v_mock = 792.0 + math.sin(t_now * 1.5) * 6.0 + random.uniform(-0.5, 0.5)
+            i_mock = -34.0 + math.sin(t_now * 0.9) * 28.0 + math.cos(t_now * 2.1) * 8.0
+            t_mock = 31.0 + (abs(i_mock) / 50.0) * 1.2
+            soc_mock = max(10.0, 84.5 - ((t_now % 300) / 300) * 5.0)
+            soh_mock = 98.40
+            udp_mgr.push_simulated_packet(v_mock, i_mock, t_mock, soc_mock, soh_mock)
+    else:
+        st.markdown("---")
+        st.markdown("#### 📡 MQTT Pipeline Diagnostics")
+        st.caption("Subscribed to HiveMQ free public broker.")
+        st.markdown(
+            """
+            • **Broker:** `broker.hivemq.com:1883`<br>
+            • **Topic:** `nevora/battery/telemetry`<br>
+            • **Cadence:** `500 ms (2.0 Hz)`
+            """,
+            unsafe_allow_html=True,
+        )
+
+        sim_mock_toggle = st.toggle(
+            "🧪 Run In-App Mock MQTT Stream",
+            value=False,
+            help="Generates synthetic 500ms battery packets internally into the MQTT pipeline.",
+        )
+        if sim_mock_toggle:
+            t_now = time.time()
+            v_mock = 792.0 + math.sin(t_now * 1.5) * 6.0 + random.uniform(-0.5, 0.5)
+            i_mock = -34.0 + math.sin(t_now * 0.9) * 28.0 + math.cos(t_now * 2.1) * 8.0
+            t_mock = 31.0 + (abs(i_mock) / 50.0) * 1.2
+            soc_mock = max(10.0, 84.5 - ((t_now % 300) / 300) * 5.0)
+            soh_mock = 98.40
+            mqtt_mgr.push_simulated_packet(v_mock, i_mock, t_mock, soc_mock, soh_mock)
 
     total_capacity_kwh = st.number_input("Pack Capacity (kWh)", min_value=40.0, max_value=200.0, value=100.0, step=5.0)
 
@@ -92,7 +478,7 @@ with st.sidebar:
         value=False,
         help="Simulates anomalous 54.2°C thermal surge and 3.38V sag in Cell #14 to demonstrate PINN early degradation detection.",
     )
-    
+
     if inject_fault:
         st.error("⚠️ BMS WARNING: Cell #14 thermal surge (54.2°C, 3.38V) detected!")
 
@@ -108,7 +494,6 @@ plotly_template = "plotly_white" if is_light else "plotly_dark"
 # Dynamic CSS Injection for Driver Day & Night Cockpit
 # ---------------------------------------------------------
 if is_light:
-    # ── CLEAN DRIVER LIGHT THEME (Crisp White Automotive Cockpit) ──
     theme_css = """
     :root {
         --bg-main: #f8fafc;
@@ -134,7 +519,6 @@ if is_light:
     }
     """
 else:
-    # ── NIGHT COCKPIT THEME (Midnight HUD with Neon Accents) ──
     theme_css = """
     :root {
         --bg-main: #070b14;
@@ -167,7 +551,6 @@ st.markdown(
 
     {theme_css}
 
-    /* Overall App Viewport */
     .stApp {{
         background-color: var(--bg-main) !important;
         color: var(--text-primary) !important;
@@ -192,7 +575,6 @@ st.markdown(
         font-family: 'JetBrains Mono', monospace !important;
     }}
 
-    /* Top Brand Cockpit Header */
     .brand-banner {{
         background: var(--bg-banner);
         border: 1px solid var(--border-accent);
@@ -209,7 +591,7 @@ st.markdown(
     .brand-title {{
         margin: 0;
         font-family: 'Rajdhani', sans-serif;
-        font-size: 1.95rem;
+        font-size: 2.1rem;
         font-weight: 700;
         letter-spacing: 2px;
         color: var(--text-primary);
@@ -239,28 +621,33 @@ st.markdown(
         box-shadow: 0 2px 6px rgba(0,0,0,0.04);
     }}
     .dot-green {{
-        width: 9px;
-        height: 9px;
+        width: 10px;
+        height: 10px;
         background-color: var(--accent-green);
         border-radius: 50%;
-        box-shadow: 0 0 6px var(--accent-green);
+        box-shadow: 0 0 8px var(--accent-green);
+        animation: pulse 1.5s infinite;
     }}
     .dot-blue {{
-        width: 9px;
-        height: 9px;
+        width: 10px;
+        height: 10px;
         background-color: var(--accent-primary);
         border-radius: 50%;
-        box-shadow: 0 0 6px var(--accent-primary);
+        box-shadow: 0 0 8px var(--accent-primary);
     }}
     .dot-red {{
-        width: 9px;
-        height: 9px;
+        width: 10px;
+        height: 10px;
         background-color: var(--accent-red);
         border-radius: 50%;
-        box-shadow: 0 0 6px var(--accent-red);
+        box-shadow: 0 0 8px var(--accent-red);
+    }}
+    @keyframes pulse {{
+        0% {{ opacity: 1; }}
+        50% {{ opacity: 0.4; }}
+        100% {{ opacity: 1; }}
     }}
 
-    /* Driver Instrument Cluster (HUD) */
     .driver-hud-panel {{
         background: var(--bg-card);
         border: 1px solid var(--border-color);
@@ -270,23 +657,6 @@ st.markdown(
         box-shadow: var(--shadow-elevation);
     }}
 
-    .hud-header {{
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin-bottom: 1.25rem;
-        padding-bottom: 0.75rem;
-        border-bottom: 1px solid var(--border-color);
-    }}
-    .hud-title {{
-        font-family: 'Rajdhani', sans-serif;
-        font-size: 1.2rem;
-        font-weight: 700;
-        letter-spacing: 1.5px;
-        color: var(--text-primary);
-    }}
-
-    /* Primary Speed & Range Dials */
     .cockpit-gauge {{
         background: var(--bg-card-sub);
         border: 1px solid var(--border-color);
@@ -329,7 +699,6 @@ st.markdown(
         margin-top: 0.4rem;
     }}
 
-    /* High Voltage Lug Cards */
     .terminal-card {{
         background: var(--bg-card-sub);
         border: 1px solid var(--border-color);
@@ -346,7 +715,6 @@ st.markdown(
         border-right: 5px solid var(--accent-primary);
     }}
 
-    /* Cell Matrix Styling */
     .cell-card {{
         background: var(--cell-bg);
         border: 1px solid var(--cell-border);
@@ -386,20 +754,13 @@ st.markdown(
         font-weight: 600;
         color: var(--text-secondary);
     }}
-
-    /* Styled Tables */
-    .stTable, .stDataFrame {{
-        background: var(--bg-card) !important;
-        color: var(--text-primary) !important;
-        border-radius: 8px;
-    }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 # ---------------------------------------------------------
-# ONNX PINN Engine Loader
+# 3. ONNX PINN Engine Loader
 # ---------------------------------------------------------
 @st.cache_resource(show_spinner=False)
 def load_onnx_model():
@@ -419,23 +780,23 @@ def load_onnx_model():
 onnx_session, onnx_status = load_onnx_model()
 
 # ---------------------------------------------------------
-# Electrochemical Butler-Volmer & PINN Evaluation
+# 4. Butler-Volmer Kinetics & PINN Inference
 # ---------------------------------------------------------
 def butler_volmer_physics_check(voltage_v, current_a, temp_c):
-    """Electrochemical kinetics validity check (src/pinn_engine.cpp)."""
+    """Electrochemical kinetics validity check."""
     faraday_constant = 96485.33212
     gas_constant = 8.314462618
     temperature_k = temp_c + 273.15
     overpotential = current_a / 1000.0
-    
+
     if temperature_k <= 0:
         return False, 0.0, "Invalid absolute temperature"
-        
+
     bv_argument = (0.5 * faraday_constant * overpotential) / (gas_constant * temperature_k)
     is_valid = (
         math.isfinite(bv_argument)
         and (233.15 < temperature_k < 373.15)
-        and (0.0 < voltage_v <= 800.0)
+        and (0.0 < voltage_v <= 850.0)
         and (abs(current_a) <= 1500.0)
         and (abs(bv_argument) < 30.0)
     )
@@ -444,17 +805,16 @@ def butler_volmer_physics_check(voltage_v, current_a, temp_c):
 def compute_pinn_digital_twin(voltage_v, current_a, temp_c, soc_percent, session=None):
     """Computes SOH, RUL, and Degradation Risk with PINN ONNX engine."""
     t_start = time.perf_counter()
-    
     physics_valid, bv_arg, physics_msg = butler_volmer_physics_check(voltage_v, current_a, temp_c)
-    
+
     thermal_stress = max(0.0, min(1.0, (temp_c - 35.0) / 45.0))
     current_stress = max(0.0, min(1.0, abs(current_a) / 1000.0))
-    
+
     base_soh = 98.4 - (thermal_stress * 10.5 + current_stress * 4.2)
     fallback_soh = max(0.0, min(100.0, base_soh))
     fallback_rul = max(0.0, fallback_soh * 12.65)
     fallback_risk = max(0.0, min(1.0, 0.65 * thermal_stress + 0.35 * current_stress + 0.04))
-    
+
     using_fallback = True
     norm_inputs = [
         float(voltage_v / 800.0),
@@ -466,24 +826,24 @@ def compute_pinn_digital_twin(voltage_v, current_a, temp_c, soc_percent, session
     soh = fallback_soh
     rul = fallback_rul
     risk = fallback_risk
-    
+
     if session is not None and physics_valid:
         try:
             inp_array = np.array([norm_inputs], dtype=np.float32)
             input_name = session.get_inputs()[0].name
             raw_out = session.run(None, {input_name: inp_array})[0][0]
-            
+
             model_soh_delta = float(raw_out[0])
             model_rul_delta = float(raw_out[1])
             model_risk_delta = float(raw_out[2])
-            
+
             soh = max(70.0, min(100.0, 98.4 - abs(model_soh_delta * 1.5) - (thermal_stress * 8.0)))
             rul = max(0.0, 1250 - (thermal_stress * 450 + current_stress * 180) + model_rul_delta * 10)
             risk = max(0.0, min(1.0, 0.04 + 0.60 * thermal_stress + 0.35 * current_stress + max(0.0, model_risk_delta * 0.05)))
             using_fallback = False
         except Exception:
             using_fallback = True
-            
+
     latency_ms = (time.perf_counter() - t_start) * 1000.0 + (3.8 if not using_fallback else 0.4)
 
     return {
@@ -499,64 +859,62 @@ def compute_pinn_digital_twin(voltage_v, current_a, temp_c, soc_percent, session
     }
 
 # ---------------------------------------------------------
-# Dynamic Calculations & State
+# 5. Helper Function: Plotly Gauge Indicator
 # ---------------------------------------------------------
-effective_temp = pack_temp if not inject_fault else max(pack_temp, 52.4)
-effective_voltage = pack_voltage if not inject_fault else min(pack_voltage, 386.0)
+def create_gauge(title, value, min_val, max_val, unit, bar_color, steps, is_light=True):
+    font_color = "#0f1923" if is_light else "#f8fafc"
+    bg_color = "rgba(0,0,0,0)"
 
-pinn_res = compute_pinn_digital_twin(
-    effective_voltage,
-    pack_current,
-    effective_temp,
-    soc,
-    session=onnx_session,
-)
-
-if inject_fault:
-    pinn_res["degradation_risk"] = 0.742
-    pinn_res["soh"] = round(pinn_res["soh"] - 5.2, 2)
-    pinn_res["rul_cycles"] = max(200, pinn_res["rul_cycles"] - 380)
-
-# Derived Vehicle & Battery Metrics
-current_kwh = round((soc / 100.0) * total_capacity_kwh, 1)
-estimated_range_km = int(round((soc / 100.0) * 580))
-power_kw = round((effective_voltage * pack_current) / 1000.0, 1)
-coolant_flow = 28.0 if inject_fault else round(14.5 + max(0.0, (effective_temp - 30.0) * 0.45), 1)
-efficiency_wh_km = int(round(165 + (abs(pack_current) / 100.0) * 25))
-vehicle_speed = default_speed if not inject_fault else max(20, default_speed - 30)
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=value,
+        title={'text': f"<b>{title}</b>", 'font': {'size': 13, 'color': font_color}},
+        number={'suffix': f" {unit}", 'font': {'size': 24, 'color': bar_color, 'family': 'Rajdhani, sans-serif'}},
+        gauge={
+            'axis': {'range': [min_val, max_val], 'tickcolor': font_color, 'tickfont': {'color': font_color, 'size': 9}},
+            'bar': {'color': bar_color, 'thickness': 0.28},
+            'bgcolor': "rgba(128,128,128,0.12)",
+            'borderwidth': 1,
+            'bordercolor': "rgba(128,128,128,0.2)",
+            'steps': steps,
+        }
+    ))
+    fig.update_layout(
+        height=190,
+        margin=dict(l=15, r=15, t=30, b=15),
+        paper_bgcolor=bg_color,
+        plot_bgcolor=bg_color,
+    )
+    return fig
 
 # ---------------------------------------------------------
-# Top Cockpit Header & Theme Indicator
+# 6. Top Brand Header & Status Pill Bar
 # ---------------------------------------------------------
 theme_icon = "☀️" if is_light else "🌙"
-theme_label = "Driver Daylight (White)" if is_light else "Night Cockpit (Dark)"
+theme_label = "Driver Daylight" if is_light else "Night Cockpit"
 
 st.markdown(
     f"""
     <div class="brand-banner">
         <div>
             <h1 class="brand-title">NEVORA <span>COCKPIT</span></h1>
-            <p class="brand-sub">800V EV DIGITAL TWIN // PHYSICS-INFORMED NEURAL NETWORK BMS</p>
+            <p class="brand-sub">800V EV DIGITAL TWIN // REAL-TIME UDP & MQTT TELEMETRY PIPELINE (500ms)</p>
         </div>
         <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
             <div class="badge-pill">
                 <span>{theme_icon} {theme_label}</span>
             </div>
             <div class="badge-pill">
+                <span class="{'dot-green' if udp_mgr.connected else 'dot-red'}"></span>
+                <span>UDP Socket: <b>{'0.0.0.0:4210 (Listening)' if udp_mgr.connected else 'Port 4210 Error'}</b></span>
+            </div>
+            <div class="badge-pill">
+                <span class="{'dot-green' if mqtt_mgr.connected else 'dot-blue'}"></span>
+                <span>MQTT Broker: <b>{'HiveMQ Active' if mqtt_mgr.connected else 'Offline'}</b></span>
+            </div>
+            <div class="badge-pill">
                 <span class="{'dot-green' if onnx_session else 'dot-blue'}"></span>
-                <span>ONNX Runtime: <b>{'v1.29 Active' if onnx_session else 'Fallback'}</b></span>
-            </div>
-            <div class="badge-pill">
-                <span class="{'dot-green' if pinn_res['physics_valid'] else 'dot-red'}"></span>
-                <span>Butler-Volmer: <b>{'Validated' if pinn_res['physics_valid'] else 'Violation'}</b></span>
-            </div>
-            <div class="badge-pill">
-                <span class="dot-green"></span>
-                <span>CAN Bus: <b>can0 (250 kbps)</b></span>
-            </div>
-            <div class="badge-pill">
-                <span class="{'dot-red' if inject_fault else 'dot-green'}"></span>
-                <span>Pack: <b>{'FAULT DETECTED' if inject_fault else 'OPTIMAL'}</b></span>
+                <span>ONNX PINN: <b>{'v1.29 Active' if onnx_session else 'Fallback'}</b></span>
             </div>
         </div>
     </div>
@@ -565,118 +923,451 @@ st.markdown(
 )
 
 # ---------------------------------------------------------
-# Primary Driver Digital Instrument Cluster (HUD Gauges)
+# 7. Streamlit Navigation Tabs
 # ---------------------------------------------------------
-st.markdown('<div class="driver-hud-panel">', unsafe_allow_html=True)
-st.markdown(
-    f"""
-    <div class="hud-header">
-        <span class="hud-title">DRIVER DIGITAL INSTRUMENT CLUSTER // LIVE TELEMETRY</span>
-        <span style="font-size: 0.82rem; font-weight: 700; color: {'#dc2626' if inject_fault else '#16a34a'};">
-            ● DRIVE MODE: {selected_mode_label.upper()}
-        </span>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-g1, g2, g3, g4, g5 = st.columns(5)
-
-with g1:
-    st.markdown(
-        f"""
-        <div class="cockpit-gauge">
-            <div class="gauge-lbl">ESTIMATED RANGE</div>
-            <div class="gauge-val" style="color: {'#16a34a' if estimated_range_km > 150 else '#dc2626'};">{estimated_range_km}<span class="gauge-unit">km</span></div>
-            <div class="gauge-sub">Full Pack: ~580 km</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-with g2:
-    soc_color = "#16a34a" if soc > 25 else "#dc2626"
-    st.markdown(
-        f"""
-        <div class="cockpit-gauge">
-            <div class="gauge-lbl">STATE OF CHARGE</div>
-            <div class="gauge-val" style="color: {soc_color};">{soc:.1f}<span class="gauge-unit">%</span></div>
-            <div class="gauge-sub">{current_kwh} / {total_capacity_kwh:.0f} kWh</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-with g3:
-    power_sign = "+" if power_kw > 0 else ""
-    power_color = "#16a34a" if power_kw > 0 else "#0284c7" if power_kw > -80 else "#dc2626"
-    st.markdown(
-        f"""
-        <div class="cockpit-gauge">
-            <div class="gauge-lbl">INSTANT POWER</div>
-            <div class="gauge-val" style="color: {power_color};">{power_sign}{power_kw:.1f}<span class="gauge-unit">kW</span></div>
-            <div class="gauge-sub">{effective_voltage:.1f}V • {pack_current:.1f}A</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-with g4:
-    soh_color = "#16a34a" if pinn_res['soh'] > 90 else "#d97706" if pinn_res['soh'] > 80 else "#dc2626"
-    st.markdown(
-        f"""
-        <div class="cockpit-gauge">
-            <div class="gauge-lbl">BATTERY SOH (PINN)</div>
-            <div class="gauge-val" style="color: {soh_color};">{pinn_res['soh']:.1f}<span class="gauge-unit">%</span></div>
-            <div class="gauge-sub">RUL: ~{pinn_res['rul_cycles']} cycles</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-with g5:
-    risk_color = "#16a34a" if pinn_res['degradation_risk'] <= 0.1 else "#d97706" if pinn_res['degradation_risk'] <= 0.3 else "#dc2626"
-    risk_label = "NOMINAL" if pinn_res['degradation_risk'] <= 0.1 else "ATTENTION" if pinn_res['degradation_risk'] <= 0.3 else "HIGH RISK"
-    st.markdown(
-        f"""
-        <div class="cockpit-gauge">
-            <div class="gauge-lbl">DEGRADATION RISK</div>
-            <div class="gauge-val" style="color: {risk_color};">{pinn_res['degradation_risk']:.3f}</div>
-            <div class="gauge-sub" style="color: {risk_color}; font-weight: 700;">{risk_label}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-# Battery Charge Progress Strip
-st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
-soc_pct = float(soc / 100.0)
-st.progress(soc_pct)
-st.markdown('</div>', unsafe_allow_html=True)
-
-# ---------------------------------------------------------
-# Cockpit Navigation Tabs
-# ---------------------------------------------------------
-tab_cockpit, tab_cells, tab_charts, tab_can, tab_guide = st.tabs([
+tab_telemetry, tab_cockpit, tab_cells, tab_charts, tab_can, tab_guide = st.tabs([
+    "⚡ Live Telemetry (UDP / MQTT)",
     "🚗 Driver HUD & High-Voltage Chassis",
     "🔋 32-Cell Battery Matrix",
-    "📈 Electrochemical Analytics",
-    "📡 CAN Bus Stream & Diagnostics",
-    "🚀 Deployment & Cloud Setup",
+    "📈 Electrochemical & PINN Analytics",
+    "📋 CAN Bus Stream & Diagnostics",
+    "🚀 ESP32 Hardware & Deployment",
 ])
 
 # =========================================================
-# TAB 1: DRIVER HUD & HIGH-VOLTAGE CHASSIS
+# TAB 1: REAL-TIME TELEMETRY PIPELINE (UDP / MQTT Dynamic Fragment)
+# =========================================================
+with tab_telemetry:
+    st.markdown("### ⚡ Real-Time Battery Telemetry Dashboard")
+    st.caption("Listening on UDP port `4210` & MQTT `nevora/battery/telemetry`. Updating dynamically without full page reloads.")
+
+    # Isolated dynamic fragment: reruns every 500ms without reloading the entire page!
+    @st.fragment(run_every=0.5)
+    def render_live_telemetry_fragment():
+        # Retrieve snapshot according to selected telemetry source
+        if is_manual_mode:
+            v_val = slider_voltage
+            i_val = slider_current
+            t_val = slider_temp
+            soc_val = slider_soc
+            soh_val = slider_soh
+            source_label = "Manual Sliders"
+            history = list(udp_mgr.history)
+            pkt_count = 0
+            is_active = True
+            protocol_name = "Manual Override"
+            raw_json_str = json.dumps({"v": v_val, "i": i_val, "t": t_val, "soc": soc_val, "soh": soh_val})
+        elif is_udp_mode:
+            snap_data, history, is_conn, pkt_count, last_pkt_time, last_sender = udp_mgr.get_snapshot()
+            v_val = snap_data["packVoltage"]
+            i_val = snap_data["packCurrent"]
+            t_val = snap_data["cellTemp"]
+            soc_val = snap_data["SoC"]
+            soh_val = snap_data["SoH"]
+            source_label = snap_data.get("source", "UDP 0.0.0.0:4210")
+            time_since_pkt = time.time() - last_pkt_time if last_pkt_time > 0 else 999.0
+            is_active = time_since_pkt < 3.0 and last_pkt_time > 0
+            protocol_name = f"UDP 0.0.0.0:4210 (Sender: {last_sender})"
+            raw_json_str = snap_data.get("raw_json", "{}")
+        else:
+            snap_data, history, is_conn, pkt_count, last_pkt_time = mqtt_mgr.get_snapshot()
+            v_val = snap_data["packVoltage"]
+            i_val = snap_data["packCurrent"]
+            t_val = snap_data["cellTemp"]
+            soc_val = snap_data["SoC"]
+            soh_val = snap_data["SoH"]
+            source_label = snap_data.get("source", "HiveMQ Broadcast")
+            time_since_pkt = time.time() - last_pkt_time if last_pkt_time > 0 else 999.0
+            is_active = time_since_pkt < 3.0 and last_pkt_time > 0
+            protocol_name = "MQTT (broker.hivemq.com:1883)"
+            raw_json_str = snap_data.get("raw_json", "{}")
+
+        # Anomaly Injection handling
+        if inject_fault:
+            t_val = max(t_val, 54.2)
+            v_val = min(v_val, 738.0)
+
+        # Evaluate PINN Digital Twin with the real-time telemetry
+        twin_eval = compute_pinn_digital_twin(v_val, i_val, t_val, soc_val, session=onnx_session)
+
+        # Connection & Stream Health Bar
+        h_col1, h_col2, h_col3, h_col4 = st.columns(4)
+        with h_col1:
+            st.markdown(
+                f"""
+                <div style="background: var(--bg-card-sub); border: 1px solid var(--border-color); border-radius: 10px; padding: 10px 14px;">
+                    <div style="font-size: 0.72rem; color: var(--text-muted); font-weight: 700;">ESP32 HARDWARE STATUS</div>
+                    <div style="font-size: 1.05rem; font-weight: 700; color: {'#16a34a' if is_active else '#d97706'};">
+                        {'🟢 Streaming Active' if is_active else '🟡 Awaiting ESP32 Packets'}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with h_col2:
+            st.markdown(
+                f"""
+                <div style="background: var(--bg-card-sub); border: 1px solid var(--border-color); border-radius: 10px; padding: 10px 14px;">
+                    <div style="font-size: 0.72rem; color: var(--text-muted); font-weight: 700;">ACTIVE INGESTION PROTOCOL</div>
+                    <div style="font-size: 1.05rem; font-weight: 700; color: var(--text-primary);">
+                        {protocol_name}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with h_col3:
+            st.markdown(
+                f"""
+                <div style="background: var(--bg-card-sub); border: 1px solid var(--border-color); border-radius: 10px; padding: 10px 14px;">
+                    <div style="font-size: 0.72rem; color: var(--text-muted); font-weight: 700;">TOTAL PACKETS PARSED</div>
+                    <div style="font-size: 1.05rem; font-weight: 700; color: var(--accent-primary);">
+                        {pkt_count} packets (500ms cadence)
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        with h_col4:
+            st.markdown(
+                f"""
+                <div style="background: var(--bg-card-sub); border: 1px solid var(--border-color); border-radius: 10px; padding: 10px 14px;">
+                    <div style="font-size: 0.72rem; color: var(--text-muted); font-weight: 700;">ACTIVE DATA SOURCE</div>
+                    <div style="font-size: 1.05rem; font-weight: 700; color: var(--text-primary);">
+                        {source_label}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+        # -----------------------------------------------------
+        # Live Metric Placeholders / Cards (5 Telemetry Variables)
+        # -----------------------------------------------------
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            col1.metric("Pack Voltage", f"{v_val:.1f} V", delta=f"{(v_val - 800.0):+.1f} V Ref")
+        with col2:
+            col2.metric("Pack Current", f"{i_val:.1f} A", delta="Charge" if i_val > 0 else "Discharge")
+        with col3:
+            col3.metric("Cell Temperature", f"{t_val:.1f} °C", delta="Elevated" if t_val > 40 else "Optimal", delta_color="inverse" if t_val > 40 else "normal")
+        with col4:
+            col4.metric("State of Charge", f"{soc_val:.1f} %", delta=f"{int(round(soc_val * 5.8))} km Range")
+        with col5:
+            col5.metric("State of Health", f"{soh_val:.1f} %", delta=f"~{twin_eval['rul_cycles']} Cyc RUL")
+
+        st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+
+        # -----------------------------------------------------
+        # 5 Live Gauge Charts (Plotly Indicators)
+        # -----------------------------------------------------
+        st.markdown("#### 🧭 Dynamic Telemetry Gauges")
+        g_c1, g_c2, g_c3, g_c4, g_c5 = st.columns(5)
+
+        with g_c1:
+            v_color = "#16a34a" if 700 <= v_val <= 830 else "#d97706" if 650 <= v_val <= 840 else "#dc2626"
+            fig_v = create_gauge(
+                "PACK VOLTAGE",
+                v_val,
+                600,
+                880,
+                "V",
+                v_color,
+                [
+                    {'range': [600, 680], 'color': "rgba(220, 38, 38, 0.25)"},
+                    {'range': [680, 830], 'color': "rgba(22, 163, 74, 0.25)"},
+                    {'range': [830, 880], 'color': "rgba(220, 38, 38, 0.25)"},
+                ],
+                is_light=is_light,
+            )
+            st.plotly_chart(fig_v, width="stretch", key=f"gauge_v_{pkt_count%2}")
+
+        with g_c2:
+            i_color = "#16a34a" if i_val > 0 else "#0284c7" if i_val > -120 else "#dc2626"
+            fig_i = create_gauge(
+                "PACK CURRENT",
+                i_val,
+                -250,
+                200,
+                "A",
+                i_color,
+                [
+                    {'range': [-250, -150], 'color': "rgba(220, 38, 38, 0.25)"},
+                    {'range': [-150, 0], 'color': "rgba(2, 132, 199, 0.25)"},
+                    {'range': [0, 200], 'color': "rgba(22, 163, 74, 0.25)"},
+                ],
+                is_light=is_light,
+            )
+            st.plotly_chart(fig_i, width="stretch", key=f"gauge_i_{pkt_count%2}")
+
+        with g_c3:
+            t_color = "#16a34a" if t_val < 38 else "#d97706" if t_val < 48 else "#dc2626"
+            fig_t = create_gauge(
+                "CORE TEMP",
+                t_val,
+                10,
+                70,
+                "°C",
+                t_color,
+                [
+                    {'range': [10, 38], 'color': "rgba(22, 163, 74, 0.25)"},
+                    {'range': [38, 48], 'color': "rgba(217, 119, 6, 0.25)"},
+                    {'range': [48, 70], 'color': "rgba(220, 38, 38, 0.3)"},
+                ],
+                is_light=is_light,
+            )
+            st.plotly_chart(fig_t, width="stretch", key=f"gauge_t_{pkt_count%2}")
+
+        with g_c4:
+            soc_color = "#16a34a" if soc_val > 30 else "#d97706" if soc_val > 15 else "#dc2626"
+            fig_soc = create_gauge(
+                "STATE OF CHARGE",
+                soc_val,
+                0,
+                100,
+                "%",
+                soc_color,
+                [
+                    {'range': [0, 20], 'color': "rgba(220, 38, 38, 0.25)"},
+                    {'range': [20, 50], 'color': "rgba(217, 119, 6, 0.25)"},
+                    {'range': [50, 100], 'color': "rgba(22, 163, 74, 0.25)"},
+                ],
+                is_light=is_light,
+            )
+            st.plotly_chart(fig_soc, width="stretch", key=f"gauge_soc_{pkt_count%2}")
+
+        with g_c5:
+            soh_color = "#16a34a" if soh_val > 90 else "#d97706" if soh_val > 80 else "#dc2626"
+            fig_soh = create_gauge(
+                "STATE OF HEALTH",
+                soh_val,
+                70,
+                100,
+                "%",
+                soh_color,
+                [
+                    {'range': [70, 80], 'color': "rgba(220, 38, 38, 0.25)"},
+                    {'range': [80, 90], 'color': "rgba(217, 119, 6, 0.25)"},
+                    {'range': [90, 100], 'color': "rgba(22, 163, 74, 0.25)"},
+                ],
+                is_light=is_light,
+            )
+            st.plotly_chart(fig_soh, width="stretch", key=f"gauge_soh_{pkt_count%2}")
+
+        st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+
+        # -----------------------------------------------------
+        # Dynamic Scrolling Line Graphs (Time Series)
+        # -----------------------------------------------------
+        st.markdown("#### 📈 Real-Time Dynamic Telemetry Waveforms (Last 30 Seconds)")
+
+        if len(history) > 1:
+            df_hist = pd.DataFrame(history)
+
+            c_graph1, c_graph2 = st.columns(2)
+
+            # Graph 1: Dual-Axis Pack Voltage & Current Trajectory
+            with c_graph1:
+                fig_vi = make_subplots(specs=[[{"secondary_y": True}]])
+                fig_vi.add_trace(
+                    go.Scatter(
+                        x=df_hist["time"],
+                        y=df_hist["packVoltage"],
+                        name="Voltage (V)",
+                        mode="lines+markers",
+                        line=dict(color="#0284c7" if is_light else "#00f2fe", width=2.5),
+                        marker=dict(size=4),
+                    ),
+                    secondary_y=False,
+                )
+                fig_vi.add_trace(
+                    go.Scatter(
+                        x=df_hist["time"],
+                        y=df_hist["packCurrent"],
+                        name="Current (A)",
+                        mode="lines",
+                        line=dict(color="#d97706" if is_light else "#fbbf24", width=2, dash="dot"),
+                    ),
+                    secondary_y=True,
+                )
+                fig_vi.update_layout(
+                    title="Pack Voltage (V) & Current (A) Dynamic Response",
+                    template=plotly_template,
+                    height=300,
+                    margin=dict(l=40, r=40, t=40, b=30),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                fig_vi.update_xaxes(title="Timestamp (UTC)", showgrid=True)
+                fig_vi.update_yaxes(title_text="Voltage (V)", secondary_y=False)
+                fig_vi.update_yaxes(title_text="Current (A)", secondary_y=True)
+                st.plotly_chart(fig_vi, width="stretch", key=f"chart_vi_{pkt_count%2}")
+
+            # Graph 2: Core Cell Temperature & Thermal Safety Gradient
+            with c_graph2:
+                fig_temp = go.Figure()
+                fig_temp.add_trace(
+                    go.Scatter(
+                        x=df_hist["time"],
+                        y=df_hist["cellTemp"],
+                        name="Core Temp (°C)",
+                        mode="lines+markers",
+                        line=dict(color="#dc2626" if is_light else "#ef4444", width=2.5),
+                        marker=dict(size=4),
+                        fill="tozeroy",
+                        fillcolor="rgba(220, 38, 38, 0.08)",
+                    )
+                )
+                fig_temp.add_hline(
+                    y=45.0,
+                    line_dash="dash",
+                    line_color="#dc2626",
+                    annotation_text="Thermal Alert (45°C)",
+                    annotation_position="top right",
+                )
+                fig_temp.update_layout(
+                    title="Core Cell Temperature Gradient & Thermal Boundary",
+                    template=plotly_template,
+                    height=300,
+                    margin=dict(l=40, r=40, t=40, b=30),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                fig_temp.update_xaxes(title="Timestamp (UTC)", showgrid=True)
+                fig_temp.update_yaxes(title="Temperature (°C)")
+                st.plotly_chart(fig_temp, width="stretch", key=f"chart_temp_{pkt_count%2}")
+
+            # Graph 3: SoC Drain & PINN Health Retention
+            fig_soc_hist = go.Figure()
+            fig_soc_hist.add_trace(
+                go.Scatter(
+                    x=df_hist["time"],
+                    y=df_hist["SoC"],
+                    name="State of Charge (SoC %)",
+                    mode="lines",
+                    line=dict(color="#16a34a" if is_light else "#38ef7d", width=2.5),
+                )
+            )
+            fig_soc_hist.add_trace(
+                go.Scatter(
+                    x=df_hist["time"],
+                    y=df_hist["SoH"],
+                    name="State of Health (SoH %)",
+                    mode="lines",
+                    line=dict(color="#0284c7" if is_light else "#38bdf8", width=2, dash="dash"),
+                )
+            )
+            fig_soc_hist.update_layout(
+                title="State of Charge (SoC) & State of Health (SoH) Trajectory",
+                template=plotly_template,
+                height=260,
+                margin=dict(l=40, r=40, t=40, b=30),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+            fig_soc_hist.update_xaxes(title="Timestamp (UTC)", showgrid=True)
+            fig_soc_hist.update_yaxes(title="Retention (%)")
+            st.plotly_chart(fig_soc_hist, width="stretch", key=f"chart_soc_{pkt_count%2}")
+
+        # Live JSON Payload Inspector
+        with st.expander("🔍 Live Decoded JSON Telemetry Inspector", expanded=False):
+            st.markdown(f"**Ingestion Source:** `{protocol_name}`")
+            st.code(raw_json_str, language="json")
+
+    # Render fragment
+    render_live_telemetry_fragment()
+
+# =========================================================
+# TAB 2: DRIVER HUD & HIGH-VOLTAGE CHASSIS
 # =========================================================
 with tab_cockpit:
+    # Use latest telemetry snapshot for chassis computations
+    snap_data_chassis = udp_mgr.latest_data if is_udp_mode else mqtt_mgr.latest_data
+    eff_voltage = snap_data_chassis["packVoltage"] if not inject_fault else min(snap_data_chassis["packVoltage"], 738.0)
+    eff_current = snap_data_chassis["packCurrent"]
+    eff_temp = snap_data_chassis["cellTemp"] if not inject_fault else max(snap_data_chassis["cellTemp"], 54.2)
+    eff_soc = snap_data_chassis["SoC"]
+
+    pinn_res = compute_pinn_digital_twin(eff_voltage, eff_current, eff_temp, eff_soc, session=onnx_session)
+    if inject_fault:
+        pinn_res["degradation_risk"] = 0.742
+        pinn_res["soh"] = round(pinn_res["soh"] - 5.2, 2)
+        pinn_res["rul_cycles"] = max(200, pinn_res["rul_cycles"] - 380)
+
+    estimated_range_km = int(round((eff_soc / 100.0) * 580))
+    power_kw = round((eff_voltage * eff_current) / 1000.0, 1)
+    coolant_flow = 28.0 if inject_fault else round(14.5 + max(0.0, (eff_temp - 30.0) * 0.45), 1)
+
+    st.markdown('<div class="driver-hud-panel">', unsafe_allow_html=True)
+    hud1, hud2, hud3, hud4, hud5 = st.columns(5)
+    with hud1:
+        st.markdown(
+            f"""
+            <div class="cockpit-gauge">
+                <div class="gauge-lbl">ESTIMATED RANGE</div>
+                <div class="gauge-val" style="color: {'#16a34a' if estimated_range_km > 150 else '#dc2626'};">{estimated_range_km}<span class="gauge-unit">km</span></div>
+                <div class="gauge-sub">Full Pack: ~580 km</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with hud2:
+        soc_color = "#16a34a" if eff_soc > 25 else "#dc2626"
+        st.markdown(
+            f"""
+            <div class="cockpit-gauge">
+                <div class="gauge-lbl">STATE OF CHARGE</div>
+                <div class="gauge-val" style="color: {soc_color};">{eff_soc:.1f}<span class="gauge-unit">%</span></div>
+                <div class="gauge-sub">{round((eff_soc/100)*total_capacity_kwh, 1)} / {total_capacity_kwh:.0f} kWh</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with hud3:
+        power_sign = "+" if power_kw > 0 else ""
+        power_color = "#16a34a" if power_kw > 0 else "#0284c7" if power_kw > -80 else "#dc2626"
+        st.markdown(
+            f"""
+            <div class="cockpit-gauge">
+                <div class="gauge-lbl">INSTANT POWER</div>
+                <div class="gauge-val" style="color: {power_color};">{power_sign}{power_kw:.1f}<span class="gauge-unit">kW</span></div>
+                <div class="gauge-sub">{eff_voltage:.1f}V • {eff_current:.1f}A</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with hud4:
+        soh_color = "#16a34a" if pinn_res['soh'] > 90 else "#d97706" if pinn_res['soh'] > 80 else "#dc2626"
+        st.markdown(
+            f"""
+            <div class="cockpit-gauge">
+                <div class="gauge-lbl">BATTERY SOH (PINN)</div>
+                <div class="gauge-val" style="color: {soh_color};">{pinn_res['soh']:.1f}<span class="gauge-unit">%</span></div>
+                <div class="gauge-sub">RUL: ~{pinn_res['rul_cycles']} cycles</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with hud5:
+        risk_color = "#16a34a" if pinn_res['degradation_risk'] <= 0.1 else "#d97706" if pinn_res['degradation_risk'] <= 0.3 else "#dc2626"
+        risk_label = "NOMINAL" if pinn_res['degradation_risk'] <= 0.1 else "ATTENTION" if pinn_res['degradation_risk'] <= 0.3 else "HIGH RISK"
+        st.markdown(
+            f"""
+            <div class="cockpit-gauge">
+                <div class="gauge-lbl">DEGRADATION RISK</div>
+                <div class="gauge-val" style="color: {risk_color};">{pinn_res['degradation_risk']:.3f}</div>
+                <div class="gauge-sub" style="color: {risk_color}; font-weight: 700;">{risk_label}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    st.markdown('</div>', unsafe_allow_html=True)
+
     c_left, c_right = st.columns([1.1, 0.9])
-    
     with c_left:
         st.markdown("#### ⚡ 800V High-Voltage Bus & Terminal Lugs")
-        
-        flow_direction = "ENERGY INFLOW (+DC)" if pack_current > 0 else "MOTOR DRAW (-DC)" if pack_current < 0 else "STANDBY"
-        flow_color = "#16a34a" if pack_current > 0 else "#0284c7"
-        
+        flow_direction = "ENERGY INFLOW (+DC)" if eff_current > 0 else "MOTOR DRAW (-DC)" if eff_current < 0 else "STANDBY"
+        flow_color = "#16a34a" if eff_current > 0 else "#0284c7"
+
         t_col1, t_col2 = st.columns(2)
         with t_col1:
             st.markdown(
@@ -684,7 +1375,7 @@ with tab_cockpit:
                 <div class="terminal-card terminal-pos">
                     <div>
                         <div style="font-size: 0.74rem; color: #dc2626; font-weight: 700;">HV+ CATHODE POST</div>
-                        <div style="font-family: 'Rajdhani', sans-serif; font-size: 1.6rem; font-weight: 700; color: var(--text-primary);">+{(effective_voltage / 2):.1f} V</div>
+                        <div style="font-family: 'Rajdhani', sans-serif; font-size: 1.6rem; font-weight: 700; color: var(--text-primary);">+{(eff_voltage / 2):.1f} V</div>
                         <div style="font-size: 0.76rem; color: {flow_color}; font-weight: 600;">▼ {flow_direction}</div>
                     </div>
                     <div style="font-size: 2rem; color: #dc2626; font-weight: 800;">+</div>
@@ -698,7 +1389,7 @@ with tab_cockpit:
                 <div class="terminal-card terminal-neg">
                     <div>
                         <div style="font-size: 0.74rem; color: #0284c7; font-weight: 700;">HV- ANODE POST</div>
-                        <div style="font-family: 'Rajdhani', sans-serif; font-size: 1.6rem; font-weight: 700; color: var(--text-primary);">-{(effective_voltage / 2):.1f} V</div>
+                        <div style="font-family: 'Rajdhani', sans-serif; font-size: 1.6rem; font-weight: 700; color: var(--text-primary);">-{(eff_voltage / 2):.1f} V</div>
                         <div style="font-size: 0.76rem; color: var(--text-muted); font-weight: 600;">GROUND ISOLATED</div>
                     </div>
                     <div style="font-size: 2rem; color: #0284c7; font-weight: 800;">-</div>
@@ -709,17 +1400,15 @@ with tab_cockpit:
 
         st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
         st.markdown("#### ❄️ Thermal Regulation & Active Liquid Chiller")
-        
         ch1, ch2 = st.columns(2)
         with ch1:
             st.metric("Liquid Chiller Flow", f"{coolant_flow:.1f} L/min", delta=f"{'+13.5' if inject_fault else 'Nominal'}")
         with ch2:
-            temp_status = "CRITICAL HIGH" if effective_temp > 50 else "ELEVATED" if effective_temp > 40 else "OPTIMAL"
-            st.metric("Battery Pack Core Temp", f"{effective_temp:.1f} °C", delta=temp_status, delta_color="inverse" if effective_temp > 40 else "normal")
+            temp_status = "CRITICAL HIGH" if eff_temp > 50 else "ELEVATED" if eff_temp > 40 else "OPTIMAL"
+            st.metric("Battery Pack Core Temp", f"{eff_temp:.1f} °C", delta=temp_status, delta_color="inverse" if eff_temp > 40 else "normal")
 
     with c_right:
         st.markdown("#### 🧠 Physics-Informed Neural Network (PINN) Co-Processor")
-        
         box_border = "#dc2626" if inject_fault else "var(--border-accent)"
         st.markdown(
             f"""
@@ -751,12 +1440,12 @@ with tab_cockpit:
         )
 
 # =========================================================
-# TAB 2: 32-CELL BATTERY MATRIX
+# TAB 3: 32-CELL BATTERY MATRIX
 # =========================================================
 with tab_cells:
     st.markdown("### 🔋 32-Cell Series-Parallel Matrix Architecture")
     st.caption("4 High-Voltage Modules (MOD-A, MOD-B, MOD-C, MOD-D) with individual cell voltage, thermal gradient, and balancing shunts.")
-    
+
     module_filter = st.radio(
         "Module Filter",
         ["ALL CELLS (32)", "MOD-A", "MOD-B", "MOD-C", "MOD-D"],
@@ -770,10 +1459,10 @@ with tab_cells:
     for i in range(1, 33):
         mod_index = (i - 1) // 8
         mod_name = modules[mod_index]
-        
+
         jitter = (np.random.rand() - 0.5) * 0.008 if enable_jitter else 0.0
         v_cell = round(4.12 + math.sin(i * 1.7) * 0.03 + jitter, 3)
-        t_cell = round(pack_temp + math.cos(i) * 1.4, 1)
+        t_cell = round(eff_temp + math.cos(i) * 1.4, 1)
         r_cell = round(1.35 + (i % 5) * 0.05, 2)
         soh_cell = round(98.2 + math.sin(i) * 0.5, 1)
         status = "optimal"
@@ -797,7 +1486,6 @@ with tab_cells:
 
     display_cells = [c for c in cell_data if c["module"] == module_filter] if module_filter != "ALL CELLS (32)" else cell_data
 
-    # Render cell matrix grid (8 cells per row)
     grid_cols = st.columns(8)
     for idx, c in enumerate(display_cells):
         col_pos = idx % 8
@@ -818,21 +1506,18 @@ with tab_cells:
             )
 
     st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
-    
-    # Deep Cell Diagnostic Inspector
     st.markdown("#### 🔬 Electrochemical Deep Inspector")
     cell_ids = [c["id"] for c in cell_data]
     default_select_idx = 13 if inject_fault else 0
-    
+
     selected_cell_id = st.selectbox(
         "Select Cell for Impedance & Health Diagnostic",
         options=cell_ids,
         index=default_select_idx,
         format_func=lambda x: f"Cell #{x:02d} ({'CRITICAL ANOMALY' if x == 14 and inject_fault else 'Nominal'})",
     )
-    
+
     target = next(c for c in cell_data if c["id"] == selected_cell_id)
-    
     insp_c1, insp_c2, insp_c3, insp_c4, insp_c5 = st.columns(5)
     with insp_c1:
         st.metric("Terminal Voltage", f"{target['voltage']:.3f} V", delta="-0.74V (Sag)" if target['status'] == 'critical' else "Nominal")
@@ -846,18 +1531,17 @@ with tab_cells:
         st.metric("Balancing Shunt", "ENGAGED" if target['balancing'] else "PASSIVE")
 
 # =========================================================
-# TAB 3: ELECTROCHEMICAL & PHYSICS ANALYTICS
+# TAB 4: ELECTROCHEMICAL & PINN ANALYTICS
 # =========================================================
 with tab_charts:
     st.markdown("### 📈 Electrochemical Kinetics & PINN Degradation Analytics")
-    
     g_col1, g_col2 = st.columns(2)
-    
+
     with g_col1:
         overpotential_range = np.linspace(-0.25, 0.25, 120)
         faraday_constant = 96485.33212
         gas_constant = 8.314462618
-        
+
         fig_bv = go.Figure()
         for t_k_val, label, color in [
             (253.15, "-20°C (Cold Load)", "#0284c7"),
@@ -875,13 +1559,13 @@ with tab_charts:
                 name=label,
                 line=dict(color=color, width=2.5),
             ))
-            
+
         fig_bv.update_layout(
             title="Butler-Volmer Kinetic Current vs Overpotential (η)",
             xaxis_title="Overpotential η (V)",
             yaxis_title="Current Density (A/m²)",
             template=plotly_template,
-            height=350,
+            height=340,
             margin=dict(l=40, r=40, t=50, b=40),
         )
         st.plotly_chart(fig_bv, width="stretch")
@@ -890,7 +1574,7 @@ with tab_charts:
         cycles = np.linspace(0, 2000, 100)
         nominal_deg = 100.0 - (cycles / 2000.0) * 22.0
         stress_deg = 100.0 - (cycles / 2000.0) * 38.0
-        
+
         fig_deg = go.Figure()
         fig_deg.add_trace(go.Scatter(
             x=cycles,
@@ -913,50 +1597,29 @@ with tab_charts:
             name="Current Twin State",
             marker=dict(size=12, color="#0284c7", symbol="diamond"),
         ))
-        
+
         fig_deg.update_layout(
             title="SOH Capacity Retention & Remaining Useful Life (RUL)",
             xaxis_title="Completed Charge/Discharge Cycles",
             yaxis_title="State of Health SOH (%)",
             template=plotly_template,
-            height=350,
+            height=340,
             margin=dict(l=40, r=40, t=50, b=40),
         )
         st.plotly_chart(fig_deg, width="stretch")
 
-    # Cell Voltage Dispersion Profile
-    st.markdown("#### 📊 32-Cell Voltage Dispersion & Delta-V")
-    voltages = [c["voltage"] for c in cell_data]
-    colors = ["#dc2626" if c["status"] == "critical" else "#0284c7" for c in cell_data]
-    
-    fig_bar = go.Figure(go.Bar(
-        x=[f"C{c['id']:02d}" for c in cell_data],
-        y=voltages,
-        marker_color=colors,
-    ))
-    fig_bar.update_layout(
-        title=f"Cell Voltage Dispersion across Pack (Delta-V: {(max(voltages) - min(voltages)):.3f} V)",
-        xaxis_title="Battery Cell ID",
-        yaxis_title="Terminal Voltage (V)",
-        yaxis_range=[3.2, 4.3],
-        template=plotly_template,
-        height=300,
-        margin=dict(l=40, r=40, t=50, b=40),
-    )
-    st.plotly_chart(fig_bar, width="stretch")
-
 # =========================================================
-# TAB 4: CAN BUS STREAM & DIAGNOSTICS
+# TAB 5: CAN BUS STREAM & DIAGNOSTICS
 # =========================================================
 with tab_can:
     st.markdown("### 📡 Live CAN Bus Packet Decoder (can0 @ 250 kbps)")
     st.caption("Decoded CAN frames generated in synchronization with C++ embedded worker (src/can_reader.cpp).")
-    
+
     now_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-    v_raw_hex = f"{int(round(effective_voltage * 10)):08X}"
-    i_raw_hex = f"{int(round((pack_current + 1000.0) * 10)):08X}"
-    t_raw_hex = f"{int(round((effective_temp + 40.0) * 10)):04X}"
-    
+    v_raw_hex = f"{int(round(eff_voltage * 10)):08X}"
+    i_raw_hex = f"{int(round((eff_current + 1000.0) * 10)):08X}"
+    t_raw_hex = f"{int(round((eff_temp + 40.0) * 10)):04X}"
+
     can_packets = [
         {
             "Timestamp": now_str,
@@ -964,7 +1627,7 @@ with tab_can:
             "Type": "V_I_TELEMETRY",
             "DLC": 8,
             "Payload (Hex)": f"{v_raw_hex[:4]} {v_raw_hex[4:]} {i_raw_hex[:4]} {i_raw_hex[4:]}",
-            "Decoded Interpretation": f"Pack Voltage: {effective_voltage:.1f}V | Pack Current: {pack_current:.1f}A",
+            "Decoded Interpretation": f"Pack Voltage: {eff_voltage:.1f}V | Pack Current: {eff_current:.1f}A",
         },
         {
             "Timestamp": now_str,
@@ -972,7 +1635,7 @@ with tab_can:
             "Type": "THERMAL_STATE",
             "DLC": 2,
             "Payload (Hex)": f"{t_raw_hex} 00 00",
-            "Decoded Interpretation": f"Pack Temperature: {effective_temp:.1f}°C | Coolant: {coolant_flow} L/min",
+            "Decoded Interpretation": f"Pack Temperature: {eff_temp:.1f}°C | Coolant: {coolant_flow} L/min",
         },
         {
             "Timestamp": now_str,
@@ -987,35 +1650,63 @@ with tab_can:
     st.table(pd.DataFrame(can_packets))
 
 # =========================================================
-# TAB 5: DEPLOYMENT & CLOUD SETUP
+# TAB 6: ESP32 HARDWARE & DEPLOYMENT GUIDE
 # =========================================================
 with tab_guide:
-    st.markdown("### 🚀 Fast Cloud Deployment & Local Execution")
-    
-    c_dep1, c_dep2 = st.columns(2)
-    with c_dep1:
-        st.markdown("#### 💻 1. Local Run")
-        st.markdown("Double-click `run_streamlit.bat` or run in terminal:")
-        st.code(
-            """# Run locally with Python
-py -3.13 -m streamlit run app.py""",
-            language="bash",
-        )
+    st.markdown("### 🔌 ESP32 Microcontroller & Network Telemetry Guide")
 
-        st.markdown("#### 🐳 2. Docker Container")
-        st.code(
-            """docker build -t nevora-bms-twin .
-docker run -p 8501:8501 nevora-bms-twin""",
-            language="bash",
-        )
-
-    with c_dep2:
-        st.markdown("#### ☁️ 3. Free Streamlit Cloud (1-Click)")
+    col_g1, col_g2 = st.columns(2)
+    with col_g1:
+        st.markdown("#### 1. UDP Local Network Broadcasting (Port 4210)")
         st.markdown(
             """
-            1. Push changes to your GitHub repository.
-            2. Open [share.streamlit.io](https://share.streamlit.io) and log in.
-            3. Select repository, set branch `main`, and main file `app.py`.
-            4. Click **Deploy!**
+            For lowest latency (<5ms) and local testing without external internet broker:
+            - **Protocol:** UDP (User Datagram Protocol)
+            - **Host Port:** `4210`
+            - **JSON Schema:**
+            ```json
+            {"v": 792.4, "i": -34.8, "t": 31.2, "soc": 82.5, "soh": 98.4}
+            ```
+            - **Arduino Sketch:** [`esp32/nevora_esp32_udp_transmitter.ino`](file:///c:/Users/KAUSHIK%20G/OneDrive/Desktop/innovate/esp32/nevora_esp32_udp_transmitter.ino)
+            - **Python Local Tester:** Run `py -3.13 simulate_esp32_udp.py` to stream packets locally to port 4210.
+            """
+        )
+
+        st.markdown("#### 2. MQTT Cloud Pipeline (HiveMQ)")
+        st.markdown(
+            """
+            For cloud deployments like **nevora.streamlit.app**:
+            - **Broker:** `broker.hivemq.com` (Port `1883`)
+            - **Topic:** `nevora/battery/telemetry`
+            - **Arduino Sketch:** [`esp32/nevora_battery_telemetry.ino`](file:///c:/Users/KAUSHIK%20G/OneDrive/Desktop/innovate/esp32/nevora_battery_telemetry.ino)
+            - **Python Local Tester:** Run `py -3.13 simulate_esp32.py`
+            """
+        )
+
+    with col_g2:
+        st.markdown("#### 3. Flash to ESP32 (Arduino IDE)")
+        st.markdown(
+            """
+            1. Open `esp32/nevora_esp32_udp_transmitter.ino` in Arduino IDE.
+            2. Update Wi-Fi credentials:
+               ```cpp
+               const char* WIFI_SSID     = "YOUR_WIFI_SSID";
+               const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+               ```
+            3. Set target IP to your PC's local IP or `IPAddress(255,255,255,255)` for subnet broadcast.
+            4. Upload to **ESP32 Dev Module** and monitor at **115200 baud**.
+            """
+        )
+
+        st.markdown("#### 4. Streamlit Cloud Deployment")
+        st.markdown(
+            """
+            1. Commit and push repository to GitHub:
+               ```bash
+               git add .
+               git commit -m "Integrate UDP and MQTT real-time pipeline"
+               git push origin main
+               ```
+            2. Deploy on [share.streamlit.io](https://share.streamlit.io) with main file `app.py`.
             """
         )
