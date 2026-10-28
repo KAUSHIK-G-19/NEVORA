@@ -925,9 +925,12 @@ st.markdown(
 # ---------------------------------------------------------
 # 7. Streamlit Navigation Tabs
 # ---------------------------------------------------------
-tab_telemetry, tab_cockpit, tab_cells, tab_charts, tab_can, tab_guide = st.tabs([
+tab_telemetry, tab_cockpit, tab_configurator, tab_tradeoffs, tab_risk, tab_cells, tab_charts, tab_can, tab_guide = st.tabs([
     "⚡ Live Telemetry (UDP / MQTT)",
     "🚗 Driver HUD & High-Voltage Chassis",
+    "⚡ Pack Configurator",
+    "📊 Multi-Physics Trade-Offs",
+    "🛡️ Risk & Traceability",
     "🔋 32-Cell Battery Matrix",
     "📈 Electrochemical & PINN Analytics",
     "📋 CAN Bus Stream & Diagnostics",
@@ -1440,7 +1443,952 @@ with tab_cockpit:
         )
 
 # =========================================================
-# TAB 3: 32-CELL BATTERY MATRIX
+# TAB 3: PACK CONFIGURATOR (Virtual Pack Design & Sizing)
+# =========================================================
+with tab_configurator:
+    st.markdown("### ⚡ Virtual Battery Pack Configurator")
+    st.caption("Virtually design, architect, and size an EV battery pack in real time based on cell electrochemistry, series-parallel topology, and thermal cooling.")
+
+    # Cell chemistry electrochemical parameter mapping
+    chem_specs = {
+        "NMC (3.7V, 2.5Ah)": {
+            "v_nominal": 3.7,
+            "c_cell": 2.5,
+            "family": "Lithium Nickel Manganese Cobalt",
+            "density_desc": "High Energy Density",
+        },
+        "LFP (3.2V, 3.2Ah)": {
+            "v_nominal": 3.2,
+            "c_cell": 3.2,
+            "family": "Lithium Iron Phosphate",
+            "density_desc": "High Thermal & Chemical Stability",
+        },
+        "LTO (2.3V, 1.5Ah)": {
+            "v_nominal": 2.3,
+            "c_cell": 1.5,
+            "family": "Lithium Titanate Oxide",
+            "density_desc": "Extreme High C-Rate & Cycle Life",
+        },
+    }
+
+    # Two columns with Streamlit card layouts
+    col_input, col_output = st.columns([1, 1], gap="large")
+
+    # -----------------------------------------------------
+    # Column 1: Pack Architecture & Configuration Inputs
+    # -----------------------------------------------------
+    with col_input:
+        with st.container(border=True):
+            st.markdown("#### 🛠️ Pack Architecture & Input Parameters")
+            st.caption("Configure series-parallel topological strings, cell chemistry, and cooling system.")
+
+            cell_chem = st.selectbox(
+                "Cell Chemistry",
+                options=[
+                    "NMC (3.7V, 2.5Ah)",
+                    "LFP (3.2V, 3.2Ah)",
+                    "LTO (2.3V, 1.5Ah)",
+                ],
+                index=0,
+                help="Select cell electrochemistry to set nominal voltage ($V_{\\text{nominal}}$) and unit capacity ($C_{\\text{cell}}$).",
+            )
+
+            s_cells = st.slider(
+                "Series Cells ($S$)",
+                min_value=1,
+                max_value=96,
+                value=10,
+                step=1,
+                help="Number of series cells ($S$). Directly determines total pack voltage.",
+            )
+
+            p_cells = st.slider(
+                "Parallel Cells ($P$)",
+                min_value=1,
+                max_value=30,
+                value=4,
+                step=1,
+                help="Number of parallel cells ($P$). Directly determines total pack capacity.",
+            )
+
+            cooling_type = st.selectbox(
+                "Thermal Cooling Type",
+                options=["Passive Air", "Forced Air", "Liquid Cooling"],
+                index=2,
+                help="Active or passive thermal heat rejection mechanism.",
+            )
+
+            # Selected Cell & Topology Breakdown Card
+            selected_spec = chem_specs[cell_chem]
+            total_cells = s_cells * p_cells
+            st.markdown("---")
+            st.markdown(
+                f"""
+                <div style="background: var(--bg-card-sub); border: 1px solid var(--border-color); border-radius: 10px; padding: 12px 16px;">
+                    <div style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Topological Summary</div>
+                    <div style="font-family: 'Rajdhani', sans-serif; font-size: 1.35rem; font-weight: 700; color: var(--accent-primary);">
+                        {s_cells}S{p_cells}P Matrix ({total_cells} Cells Total)
+                    </div>
+                    <div style="font-size: 0.82rem; color: var(--text-secondary); margin-top: 4px; line-height: 1.5;">
+                        • <b>Cell Rating:</b> {selected_spec['v_nominal']} V nom &bull; {selected_spec['c_cell']} Ah unit<br>
+                        • <b>Chemistry:</b> {selected_spec['family']} ({selected_spec['density_desc']})<br>
+                        • <b>Thermal Regime:</b> {cooling_type} Management
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    # -----------------------------------------------------
+    # Real-Time Engineering Computations
+    # -----------------------------------------------------
+    v_nominal = chem_specs[cell_chem]["v_nominal"]
+    c_cell = chem_specs[cell_chem]["c_cell"]
+
+    # Formulas:
+    # V_pack = S * V_nominal
+    # C_pack = P * C_cell
+    # E_kWh = (V_pack * C_pack) / 1000
+    # M = (S * P * 0.070) * 1.25 factor
+    # Cost = (S * P * $3.50) * 1.3 factor
+    v_pack = s_cells * v_nominal
+    c_pack = p_cells * c_cell
+    e_kwh = (v_pack * c_pack) / 1000.0
+    pack_mass_kg = (s_cells * p_cells * 0.070) * 1.25
+    pack_cost_usd = (s_cells * p_cells * 3.50) * 1.30
+    energy_density_wh_kg = (e_kwh * 1000.0) / pack_mass_kg if pack_mass_kg > 0 else 0.0
+
+    # -----------------------------------------------------
+    # Column 2: Pack Sizing Outputs (st.metric Real-time Cards)
+    # -----------------------------------------------------
+    with col_output:
+        with st.container(border=True):
+            st.markdown("#### 📊 Pack Sizing & Real-Time Engineering Metrics")
+            st.caption("Live engineering sizing estimations calculated from physical topology and cost models:")
+
+            # Metric Cards Row 1: Voltage and Capacity
+            m_col1, m_col2 = st.columns(2)
+            with m_col1:
+                st.metric(
+                    label="Total Pack Voltage ($V_{\\text{pack}}$)",
+                    value=f"{v_pack:.1f} V",
+                    delta=f"{s_cells} × {v_nominal:.1f} V nom",
+                    delta_color="normal",
+                )
+            with m_col2:
+                st.metric(
+                    label="Total Pack Capacity ($C_{\\text{pack}}$)",
+                    value=f"{c_pack:.1f} Ah",
+                    delta=f"{p_cells} × {c_cell:.1f} Ah unit",
+                    delta_color="normal",
+                )
+
+            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+            # Metric Cards Row 2: Energy and Mass
+            m_col3, m_col4 = st.columns(2)
+            with m_col3:
+                st.metric(
+                    label="Total Pack Energy ($E_{\\text{kWh}}$)",
+                    value=f"{e_kwh:.3f} kWh",
+                    delta=f"{(e_kwh * 1000):.1f} Wh total",
+                    delta_color="normal",
+                )
+            with m_col4:
+                st.metric(
+                    label="Estimated Pack Mass",
+                    value=f"{pack_mass_kg:.2f} kg",
+                    delta="1.25× Enclosure Factor",
+                    delta_color="off",
+                )
+
+            st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+            # Metric Cards Row 3: BOM Cost and Energy Density
+            m_col5, m_col6 = st.columns(2)
+            with m_col5:
+                st.metric(
+                    label="Estimated Pack BOM Cost",
+                    value=f"${pack_cost_usd:,.2f}",
+                    delta="1.3× BOM Factor ($3.50/cell)",
+                    delta_color="off",
+                )
+            with m_col6:
+                st.metric(
+                    label="Gravimetric Energy Density",
+                    value=f"{energy_density_wh_kg:.1f} Wh/kg",
+                    delta=f"{cooling_type} System",
+                    delta_color="normal",
+                )
+
+            st.markdown("---")
+            # Mathematical Formulation Card
+            st.markdown(
+                f"""
+                <div style="background: var(--bg-card-sub); border: 1px solid var(--border-color); border-radius: 10px; padding: 12px 16px;">
+                    <div style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Engineering Sizing Formulations</div>
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; line-height: 1.6; color: var(--text-secondary);">
+                        • <b>V<sub>pack</sub>:</b> S × V<sub>nom</sub> = {s_cells} × {v_nominal:.1f}V = <span style="color: var(--accent-primary); font-weight: 700;">{v_pack:.1f} V</span><br>
+                        • <b>C<sub>pack</sub>:</b> P × C<sub>cell</sub> = {p_cells} × {c_cell:.1f}Ah = <span style="color: var(--accent-primary); font-weight: 700;">{c_pack:.1f} Ah</span><br>
+                        • <b>E<sub>kWh</sub>:</b> (V<sub>pack</sub> × C<sub>pack</sub>) / 1000 = <span style="color: var(--accent-green); font-weight: 700;">{e_kwh:.3f} kWh</span><br>
+                        • <b>Mass (kg):</b> (S × P × 0.070) × 1.25 = <span style="color: var(--text-primary); font-weight: 700;">{pack_mass_kg:.2f} kg</span><br>
+                        • <b>BOM Cost:</b> (S × P × $3.50) × 1.30 = <span style="color: var(--text-primary); font-weight: 700;">${pack_cost_usd:,.2f}</span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+# =========================================================
+# TAB 4: MULTI-PHYSICS TRADE-OFFS
+# =========================================================
+with tab_tradeoffs:
+    st.markdown("### 📊 Multi-Physics Battery Pack Trade-Off Analysis")
+    st.caption(
+        "Interactive radar benchmarking, configuration comparison table, and C-Rate thermal simulation "
+        "across **Config A — High Energy NMC** vs **Config B — High Safety LFP** pack architectures."
+    )
+
+    # -----------------------------------------------------------------
+    # Section 1: Radar / Spider Chart — 5 Core Battery Parameters
+    # -----------------------------------------------------------------
+    st.markdown("#### 🕸️ Multi-Dimensional Performance Radar")
+    st.caption(
+        "Scores (0–10) across Energy Density, Thermal Safety, Charging Speed, Lifespan, and Cost Efficiency. "
+        "Fill opacity encodes each pack's strength profile."
+    )
+
+    radar_categories = [
+        "Energy Density",
+        "Thermal Safety",
+        "Charging Speed",
+        "Lifespan",
+        "Cost Efficiency",
+    ]
+
+    # NMC: high energy, lower thermal safety, fast charge, shorter lifespan, costlier
+    # LFP: lower energy, best thermal safety, slower charge, longest lifespan, cheapest
+    radar_scores_nmc = [9.2, 5.8, 8.0, 6.8, 6.5]
+    radar_scores_lfp = [7.0, 9.4, 6.5, 9.5, 9.0]
+
+    radar_df = pd.DataFrame({
+        "Parameter": radar_categories * 2,
+        "Score": radar_scores_nmc + radar_scores_lfp,
+        "Configuration": (
+            ["Config A — High Energy NMC Pack"] * len(radar_categories) +
+            ["Config B — High Safety LFP Pack"] * len(radar_categories)
+        ),
+    })
+
+    radar_col, radar_info_col = st.columns([1.55, 1], gap="large")
+
+    with radar_col:
+        fig_radar = px.line_polar(
+            radar_df,
+            r="Score",
+            theta="Parameter",
+            color="Configuration",
+            line_close=True,
+            range_r=[0, 10],
+            color_discrete_map={
+                "Config A — High Energy NMC Pack": "#0ea5e9",
+                "Config B — High Safety LFP Pack": "#38ef7d",
+            },
+            template=plotly_template,
+        )
+        fig_radar.update_traces(
+            fill="toself",
+            opacity=0.38,
+            line=dict(width=2.5),
+        )
+        fig_radar.update_layout(
+            height=440,
+            margin=dict(l=30, r=30, t=30, b=20),
+            legend=dict(
+                orientation="h",
+                y=-0.12,
+                xanchor="center",
+                x=0.5,
+                font=dict(size=11),
+            ),
+            polar=dict(
+                radialaxis=dict(
+                    visible=True,
+                    range=[0, 10],
+                    tickfont=dict(size=9),
+                    gridcolor="rgba(128,128,128,0.2)",
+                ),
+                angularaxis=dict(
+                    tickfont=dict(size=11, family="Rajdhani, sans-serif"),
+                    gridcolor="rgba(128,128,128,0.2)",
+                ),
+            ),
+        )
+        st.plotly_chart(fig_radar, use_container_width=True)
+
+    with radar_info_col:
+        st.markdown("<div style='height: 18px;'></div>", unsafe_allow_html=True)
+        # Score cards per parameter
+        param_icons = {
+            "Energy Density": "⚡",
+            "Thermal Safety": "🌡️",
+            "Charging Speed": "🔋",
+            "Lifespan": "♻️",
+            "Cost Efficiency": "💰",
+        }
+        for param, nmc_s, lfp_s in zip(radar_categories, radar_scores_nmc, radar_scores_lfp):
+            winner = "NMC" if nmc_s >= lfp_s else "LFP"
+            winner_color = "#0ea5e9" if winner == "NMC" else "#38ef7d"
+            st.markdown(
+                f"""
+                <div style="background: var(--bg-card-sub); border: 1px solid var(--border-color);
+                            border-radius: 10px; padding: 9px 13px; margin-bottom: 7px;
+                            display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <span style="font-size: 0.82rem; font-weight: 700;
+                                     color: var(--text-primary);">{param_icons[param]} {param}</span>
+                    </div>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <span style="font-family: 'Rajdhani', sans-serif; font-size: 1.05rem;
+                                     font-weight: 700; color: #0ea5e9;">{nmc_s}</span>
+                        <span style="font-size: 0.72rem; color: var(--text-muted);">vs</span>
+                        <span style="font-family: 'Rajdhani', sans-serif; font-size: 1.05rem;
+                                     font-weight: 700; color: #38ef7d;">{lfp_s}</span>
+                        <span style="font-size: 0.72rem; padding: 2px 7px; border-radius: 12px;
+                                     background: var(--bg-card);
+                                     color: {winner_color}; font-weight: 700; border: 1px solid {winner_color}30;">
+                            ▲ {winner}
+                        </span>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+    # -----------------------------------------------------------------
+    # Section 2: Dynamic Comparison Table — Config A vs Config B
+    # -----------------------------------------------------------------
+    st.markdown("#### 📋 Configuration Specification Comparison Table")
+    st.caption(
+        "Side-by-side engineering comparison of **Config A (High Energy NMC)** vs **Config B (High Safety LFP)** "
+        "across pack-level design metrics."
+    )
+
+    comparison_data = {
+        "Specification": [
+            "Pack Energy (kWh)",
+            "Weight (kg)",
+            "Max C-Rate",
+            "Nominal Voltage (V)",
+            "Thermal Limit (°C)",
+            "Cycle Life (cycles)",
+            "Gravimetric Density (Wh/kg)",
+            "Total Cell Cost ($)",
+        ],
+        "Config A — High Energy NMC": [
+            "107.5 kWh",
+            "620 kg",
+            "4.0C",
+            "400 V",
+            "45 °C",
+            "~1,500 cycles",
+            "173 Wh/kg",
+            "$12,740",
+        ],
+        "Config B — High Safety LFP": [
+            "92.0 kWh",
+            "680 kg",
+            "2.5C",
+            "345 V",
+            "60 °C",
+            "~3,500 cycles",
+            "135 Wh/kg",
+            "$9,100",
+        ],
+        "Advantage": [
+            "⚡ NMC (+15.8%)",
+            "⚡ NMC (−60 kg)",
+            "⚡ NMC (faster)",
+            "⚡ NMC (+55 V)",
+            "🛡️ LFP (+15°C limit)",
+            "♻️ LFP (+2,000 cyc)",
+            "⚡ NMC (+38 Wh/kg)",
+            "💰 LFP (−$3,640)",
+        ],
+    }
+
+    df_compare = pd.DataFrame(comparison_data)
+
+    st.dataframe(
+        df_compare,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Specification": st.column_config.TextColumn(
+                "Specification", width="medium"
+            ),
+            "Config A — High Energy NMC": st.column_config.TextColumn(
+                "Config A ⚡ NMC", width="medium"
+            ),
+            "Config B — High Safety LFP": st.column_config.TextColumn(
+                "Config B 🛡️ LFP", width="medium"
+            ),
+            "Advantage": st.column_config.TextColumn(
+                "Pack Advantage", width="medium"
+            ),
+        },
+    )
+
+    st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+
+    # -----------------------------------------------------------------
+    # Section 3: C-Rate Thermal Simulation — Interactive Slider
+    # -----------------------------------------------------------------
+    st.markdown("#### 🌡️ C-Rate Thermal Simulation — Estimated Temperature Rise Curve")
+    st.caption(
+        "Simulate thermal runaway risk across discharge rates. "
+        "Model: `T(t) = T_ambient + K·(C-Rate^α) · (1 − e^(−t/τ))` — electrochemical exponential thermal heating."
+    )
+
+    sim_col_ctrl, sim_col_chart = st.columns([0.9, 2.1], gap="large")
+
+    with sim_col_ctrl:
+        st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
+        c_rate_sim = st.slider(
+            "⚡ Discharge C-Rate",
+            min_value=0.5,
+            max_value=5.0,
+            value=2.0,
+            step=0.1,
+            format="%.1fC",
+            help=(
+                "C-Rate is the discharge current relative to nominal capacity. "
+                "1C = full discharge in 1 hour. 5C = full discharge in 12 minutes."
+            ),
+        )
+
+        # Derived thermal parameters at selected C-Rate
+        T_ambient = 25.0
+        K_nmc = 3.8        # thermal gain constant NMC (higher resistivity)
+        K_lfp = 3.1        # thermal gain constant LFP (more thermally stable)
+        alpha_nmc = 1.8    # super-linear C-Rate exponent NMC
+        alpha_lfp = 1.65   # sub-linear C-Rate exponent LFP
+        tau_nmc = 7.5      # thermal time constant NMC (faster heating)
+        tau_lfp = 9.0      # thermal time constant LFP (slower heating)
+
+        t_duration = min(45.0, 60.0 / c_rate_sim)
+        t_nmc_peak = T_ambient + K_nmc * (c_rate_sim ** alpha_nmc)
+        t_lfp_peak = T_ambient + K_lfp * (c_rate_sim ** alpha_lfp)
+
+        # Threshold flags
+        nmc_warn = t_nmc_peak >= 45.0
+        nmc_crit = t_nmc_peak >= 55.0
+        lfp_warn = t_lfp_peak >= 55.0
+        lfp_crit = t_lfp_peak >= 65.0
+
+        nmc_status_color = "#dc2626" if nmc_crit else "#d97706" if nmc_warn else "#16a34a"
+        nmc_status_label = "⚠️ CRITICAL" if nmc_crit else "🟡 WARNING" if nmc_warn else "✅ NOMINAL"
+        lfp_status_color = "#dc2626" if lfp_crit else "#d97706" if lfp_warn else "#16a34a"
+        lfp_status_label = "⚠️ CRITICAL" if lfp_crit else "🟡 WARNING" if lfp_warn else "✅ NOMINAL"
+
+        st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
+        st.markdown(
+            f"""
+            <div style="background: var(--bg-card-sub); border: 1px solid var(--border-color);
+                        border-radius: 12px; padding: 14px 16px;">
+                <div style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted);
+                            text-transform: uppercase; margin-bottom: 8px; letter-spacing: 1px;">
+                    Thermal Simulation @ {c_rate_sim:.1f}C
+                </div>
+                <div style="margin-bottom: 10px;">
+                    <div style="font-size: 0.78rem; color: #0ea5e9; font-weight: 700;">
+                        Config A (NMC)
+                    </div>
+                    <div style="font-family: 'Rajdhani', sans-serif; font-size: 1.9rem;
+                                font-weight: 700; color: {nmc_status_color}; line-height: 1.1;">
+                        {t_nmc_peak:.1f}°C
+                    </div>
+                    <div style="font-size: 0.78rem; font-weight: 700; color: {nmc_status_color};">
+                        {nmc_status_label}
+                    </div>
+                </div>
+                <div style="border-top: 1px solid var(--border-color); padding-top: 10px;">
+                    <div style="font-size: 0.78rem; color: #38ef7d; font-weight: 700;">
+                        Config B (LFP)
+                    </div>
+                    <div style="font-family: 'Rajdhani', sans-serif; font-size: 1.9rem;
+                                font-weight: 700; color: {lfp_status_color}; line-height: 1.1;">
+                        {t_lfp_peak:.1f}°C
+                    </div>
+                    <div style="font-size: 0.78rem; font-weight: 700; color: {lfp_status_color};">
+                        {lfp_status_label}
+                    </div>
+                </div>
+                <div style="border-top: 1px solid var(--border-color); padding-top: 8px; margin-top: 10px;
+                            font-family: 'JetBrains Mono', monospace; font-size: 0.73rem;
+                            color: var(--text-muted); line-height: 1.55;">
+                    Discharge window: {t_duration:.0f} min<br>
+                    ΔT advantage (LFP): {t_nmc_peak - t_lfp_peak:.1f}°C cooler
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with sim_col_chart:
+        # Build time-series temperature rise dataframe
+        time_pts_sim = np.linspace(0, t_duration, 50)
+        t_nmc_curve = T_ambient + K_nmc * (c_rate_sim ** alpha_nmc) * (1.0 - np.exp(-time_pts_sim / tau_nmc))
+        t_lfp_curve = T_ambient + K_lfp * (c_rate_sim ** alpha_lfp) * (1.0 - np.exp(-time_pts_sim / tau_lfp))
+
+        df_thermal = pd.DataFrame(
+            {
+                "Config A — NMC Pack (°C)": np.round(t_nmc_curve, 2),
+                "Config B — LFP Pack (°C)": np.round(t_lfp_curve, 2),
+            },
+            index=np.round(time_pts_sim, 1),
+        )
+        df_thermal.index.name = "Time (min)"
+
+        # Plotly line chart for richer annotation (warning threshold lines)
+        fig_thermal = go.Figure()
+        fig_thermal.add_trace(go.Scatter(
+            x=df_thermal.index,
+            y=df_thermal["Config A — NMC Pack (°C)"],
+            name="Config A — NMC Pack",
+            mode="lines",
+            line=dict(color="#0ea5e9", width=2.8),
+            fill="tozeroy",
+            fillcolor="rgba(14, 165, 233, 0.07)",
+        ))
+        fig_thermal.add_trace(go.Scatter(
+            x=df_thermal.index,
+            y=df_thermal["Config B — LFP Pack (°C)"],
+            name="Config B — LFP Pack",
+            mode="lines",
+            line=dict(color="#38ef7d", width=2.8),
+            fill="tozeroy",
+            fillcolor="rgba(56, 239, 125, 0.07)",
+        ))
+
+        # Thermal threshold annotation bands
+        fig_thermal.add_hline(
+            y=45.0,
+            line_dash="dash",
+            line_color="#d97706",
+            line_width=1.5,
+            annotation_text="NMC Warning: 45°C",
+            annotation_position="top right",
+            annotation_font=dict(size=10, color="#d97706"),
+        )
+        fig_thermal.add_hline(
+            y=60.0,
+            line_dash="dash",
+            line_color="#dc2626",
+            line_width=1.5,
+            annotation_text="Critical Limit: 60°C",
+            annotation_position="top right",
+            annotation_font=dict(size=10, color="#dc2626"),
+        )
+
+        # Ambient baseline
+        fig_thermal.add_hline(
+            y=25.0,
+            line_dash="dot",
+            line_color="rgba(128,128,128,0.4)",
+            line_width=1,
+            annotation_text="Ambient: 25°C",
+            annotation_position="bottom right",
+            annotation_font=dict(size=9, color="gray"),
+        )
+
+        fig_thermal.update_layout(
+            title=f"Thermal Rise Simulation at {c_rate_sim:.1f}C Discharge Rate",
+            xaxis_title="Discharge Time (min)",
+            yaxis_title="Battery Pack Temperature (°C)",
+            template=plotly_template,
+            height=360,
+            margin=dict(l=50, r=40, t=50, b=45),
+            legend=dict(
+                orientation="h",
+                y=-0.22,
+                xanchor="center",
+                x=0.5,
+                font=dict(size=11),
+            ),
+            yaxis=dict(range=[20, max(70, t_nmc_peak + 8)]),
+        )
+        st.plotly_chart(fig_thermal, use_container_width=True)
+
+    # C-Rate summary ribbon
+    st.markdown(
+        f"""
+        <div style="background: var(--bg-card-sub); border: 1px solid var(--border-color); border-radius: 10px;
+                    padding: 10px 18px; display: flex; gap: 24px; flex-wrap: wrap; margin-top: 4px;">
+            <div style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted); align-self: center;">
+                📐 PHYSICS MODEL
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
+                        color: var(--text-secondary); line-height: 1.5;">
+                <b>T(t)</b> = T<sub>amb</sub> + K · (C-Rate)<sup>α</sup> · (1 − e<sup>−t/τ</sup>)
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
+                        color: #0ea5e9; line-height: 1.5;">
+                NMC: K={K_nmc}, α={alpha_nmc}, τ={tau_nmc}s
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
+                        color: #38ef7d; line-height: 1.5;">
+                LFP: K={K_lfp}, α={alpha_lfp}, τ={tau_lfp}s
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# =========================================================
+# TAB 5: RISK & TRACEABILITY
+# =========================================================
+with tab_risk:
+    st.markdown("### 🛡️ Risk Assessment & Battery Traceability Console")
+    st.caption(
+        "Rule-based safety diagnostics evaluated against live telemetry, plus cell-level "
+        "voltage imbalance tracking for propagation traceability."
+    )
+
+    # ------------------------------------------------------------------
+    # Pull live telemetry for risk evaluation
+    # ------------------------------------------------------------------
+    # Re-use the already-resolved eff_voltage / eff_temp computed in Tab 2.
+    # Guard: if user is in Manual Slider mode the sidebar sliders are live.
+    if is_manual_mode:
+        risk_voltage = slider_voltage
+        risk_temp    = slider_temp
+    else:
+        risk_voltage = eff_voltage
+        risk_temp    = eff_temp
+
+    # Apply fault injection so the banners react to the sidebar toggle
+    if inject_fault:
+        risk_temp    = max(risk_temp, 54.2)
+        risk_voltage = min(risk_voltage, 738.0)
+
+    # ------------------------------------------------------------------
+    # Section 1: Automated Rule-Based Safety Recommendation Banner
+    # ------------------------------------------------------------------
+    st.markdown("#### 🚨 Automated Safety Diagnostics & Recommendation Engine")
+    st.caption(
+        "Rules are evaluated against live telemetry every render cycle. "
+        "Priority: **Thermal Risk** → **Deep Discharge** → **System Nominal**."
+    )
+
+    # Evaluate rule priority (thermal takes precedence)
+    if risk_temp > 45.0:
+        st.error(
+            f"🔥 **CRITICAL THERMAL RISK** — Core temperature **{risk_temp:.1f}°C** exceeds 45°C safety ceiling.\n\n"
+            "**Recommendation:** Passive cooling is **insufficient** at this load condition.  \n"
+            "→ Upgrade thermal system to **Liquid Cooling** (≥12 L/min coolant flow), **or**  \n"
+            "→ Limit discharge rate to **≤ 1C** immediately to arrest thermal escalation.  \n"
+            "→ BMS hardware relay: **prepare for emergency load isolation** if temp exceeds 55°C."
+        )
+    elif risk_voltage < 10.0:
+        st.error(
+            f"⚡ **DEEP DISCHARGE WARNING** — Pack voltage **{risk_voltage:.2f}V** has collapsed below 10.0V threshold.\n\n"
+            "**Action:** Actuating **Hardware Safety Relay** to isolate load from battery terminals.  \n"
+            "→ Prevent irreversible lithium plating and cathode dissolution.  \n"
+            "→ Do **not** attempt recharge until cell voltages are individually inspected.  \n"
+            "→ Estimated capacity loss at this depth: **>12% permanent degradation**."
+        )
+    else:
+        st.success(
+            f"✅ **SYSTEM HEALTH OPTIMAL** — All parameters operating within normal safety margins.\n\n"
+            f"→ Pack Voltage: **{risk_voltage:.1f} V** (nominal range: 10 – 850 V)  \n"
+            f"→ Core Temperature: **{risk_temp:.1f}°C** (within 45°C ceiling)  \n"
+            "→ BMS relay: **CLOSED (load connected)** — no protective actions required."
+        )
+
+    # Warning sub-banner for elevated (not yet critical) temperature
+    if 38.0 < risk_temp <= 45.0:
+        st.warning(
+            f"🌡️ **THERMAL ADVISORY** — Temperature at **{risk_temp:.1f}°C** is elevated (38–45°C watch zone).  \n"
+            "Monitor closely. Consider activating **Forced Air** cooling pre-emptively."
+        )
+
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+    # Telemetry snapshot pill bar
+    snap_r1, snap_r2, snap_r3, snap_r4 = st.columns(4)
+    _pill_style = (
+        "background: var(--bg-card-sub); border: 1px solid var(--border-color); "
+        "border-radius: 10px; padding: 9px 13px;"
+    )
+    _lbl_style = "font-size: 0.72rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;"
+    _val_style = "font-family: 'Rajdhani', sans-serif; font-size: 1.45rem; font-weight: 700; color: var(--text-primary); line-height: 1.1;"
+    _sub_style = "font-size: 0.73rem; font-weight: 600; color: var(--text-secondary);"
+
+    _t_color  = "#dc2626" if risk_temp  > 45 else "#d97706" if risk_temp > 38 else "#16a34a"
+    _v_color  = "#dc2626" if risk_voltage < 10 else "#16a34a"
+    _soc_color = "#16a34a"
+    _soh_color = "#16a34a"
+
+    with snap_r1:
+        st.markdown(
+            f"<div style='{_pill_style}'>"
+            f"<div style='{_lbl_style}'>Pack Voltage</div>"
+            f"<div style='{_val_style} color: {_v_color};'>{risk_voltage:.1f} V</div>"
+            f"<div style='{_sub_style}'>{'⚠ DEEP DISCHARGE' if risk_voltage < 10 else 'Nominal Range'}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with snap_r2:
+        st.markdown(
+            f"<div style='{_pill_style}'>"
+            f"<div style='{_lbl_style}'>Core Temperature</div>"
+            f"<div style='{_val_style} color: {_t_color};'>{risk_temp:.1f} °C</div>"
+            f"<div style='{_sub_style}'>{'🔥 CRITICAL' if risk_temp > 45 else '🟡 WATCH' if risk_temp > 38 else '✅ Optimal'}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with snap_r3:
+        _soc_val = eff_soc if not is_manual_mode else slider_soc
+        st.markdown(
+            f"<div style='{_pill_style}'>"
+            f"<div style='{_lbl_style}'>State of Charge</div>"
+            f"<div style='{_val_style} color: {_soc_color};'>{_soc_val:.1f} %</div>"
+            f"<div style='{_sub_style}'>~{int(_soc_val * 5.8)} km est. range</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    with snap_r4:
+        _src_label = "Manual Sliders" if is_manual_mode else ("UDP 0.0.0.0:4210" if is_udp_mode else "MQTT HiveMQ")
+        st.markdown(
+            f"<div style='{_pill_style}'>"
+            f"<div style='{_lbl_style}'>Telemetry Source</div>"
+            f"<div style='font-size: 0.9rem; font-weight: 700; color: var(--accent-primary); line-height: 1.2; margin-top: 2px;'>{_src_label}</div>"
+            f"<div style='{_sub_style}'>{'Fault injection ACTIVE' if inject_fault else 'Live pipeline'}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("<div style='height: 18px;'></div>", unsafe_allow_html=True)
+
+    # ------------------------------------------------------------------
+    # Section 2: 4-Cell Voltage Imbalance Traceability Block
+    # ------------------------------------------------------------------
+    st.markdown("#### 🔬 4-Cell Voltage Imbalance & Propagation Traceability")
+    st.caption(
+        "Virtual cell group sampled from live pack voltage. "
+        "ΔV variance metric detects cell-to-cell degradation propagation pathways."
+    )
+
+    # Derive cell voltages from live pack voltage with synthetic per-cell offsets
+    # Base single-cell voltage ≈ pack_voltage / 108 cells (standard 800V / 7.4V series string)
+    _cell_base = risk_voltage / 108.0        # per-cell nominal from live pack
+    _cell_base = max(3.0, min(4.25, _cell_base))   # clamp to valid lithium range
+
+    # Deterministic per-cell jitter seeded from current second for gentle drift effect
+    _seed_t = int(time.time()) % 100
+    rng = np.random.default_rng(seed=_seed_t)
+
+    # If fault injected → Cell 3 gets a pronounced sag
+    _offsets = rng.uniform(-0.025, 0.025, 4)
+    if inject_fault:
+        _offsets[2] = -0.38    # Cell 3 severe voltage sag (fault injection)
+
+    v1 = round(_cell_base + _offsets[0], 4)
+    v2 = round(_cell_base + _offsets[1], 4)
+    v3 = round(_cell_base + _offsets[2], 4)
+    v4 = round(_cell_base + _offsets[3], 4)
+
+    cell_voltages = [v1, v2, v3, v4]
+    v_max  = max(cell_voltages)
+    v_min  = min(cell_voltages)
+    v_mean = round(sum(cell_voltages) / 4, 4)
+    delta_v = round(v_max - v_min, 4)
+
+    # Imbalance severity classification
+    if delta_v > 0.200:
+        imbal_label = "🔴 SEVERE IMBALANCE"
+        imbal_color = "#dc2626"
+        imbal_bg    = "rgba(220,38,38,0.12)"
+        imbal_border= "#dc2626"
+        imbal_desc  = "Cell failure probable. Initiate emergency balancing & cell inspection."
+    elif delta_v > 0.080:
+        imbal_label = "🟡 MODERATE IMBALANCE"
+        imbal_color = "#d97706"
+        imbal_bg    = "rgba(217,119,6,0.10)"
+        imbal_border= "#d97706"
+        imbal_desc  = "Passive balancing engaged. Monitor propagation trajectory."
+    elif delta_v > 0.030:
+        imbal_label = "🔵 MINOR IMBALANCE"
+        imbal_color = "#0ea5e9"
+        imbal_bg    = "rgba(14,165,233,0.10)"
+        imbal_border= "#0ea5e9"
+        imbal_desc  = "Within passive balancing tolerance. No action required."
+    else:
+        imbal_label = "🟢 BALANCED"
+        imbal_color = "#16a34a"
+        imbal_bg    = "rgba(22,163,74,0.10)"
+        imbal_border= "#16a34a"
+        imbal_desc  = "All cells matched within ±30 mV. Excellent uniformity."
+
+    # ΔV bar chart via Plotly for clean inline visualization
+    fig_cells = go.Figure()
+    cell_labels = ["V₁ — Cell 1", "V₂ — Cell 2", "V₃ — Cell 3", "V₄ — Cell 4"]
+    bar_colors  = []
+    for cv in cell_voltages:
+        deviation = abs(cv - v_mean)
+        if deviation > 0.15:
+            bar_colors.append("#dc2626")
+        elif deviation > 0.05:
+            bar_colors.append("#d97706")
+        else:
+            bar_colors.append("#16a34a" if not is_dark else "#38ef7d")
+
+    fig_cells.add_trace(go.Bar(
+        x=cell_labels,
+        y=cell_voltages,
+        marker_color=bar_colors,
+        text=[f"{cv:.4f} V" for cv in cell_voltages],
+        textposition="outside",
+        textfont=dict(size=13, family="Rajdhani, sans-serif"),
+        width=0.45,
+    ))
+
+    # Mean reference line
+    fig_cells.add_hline(
+        y=v_mean,
+        line_dash="dash",
+        line_color="#0ea5e9",
+        line_width=2,
+        annotation_text=f"V̄ mean = {v_mean:.4f} V",
+        annotation_position="top left",
+        annotation_font=dict(size=10, color="#0ea5e9"),
+    )
+    # ΔV annotation arrow between min & max
+    fig_cells.add_annotation(
+        x=cell_labels[cell_voltages.index(v_min)],
+        y=v_min,
+        text=f"▼ ΔV = {delta_v:.4f} V",
+        showarrow=True,
+        arrowhead=2,
+        arrowcolor=imbal_color,
+        font=dict(size=11, color=imbal_color, family="Rajdhani, sans-serif"),
+        ay=30,
+    )
+
+    y_pad = max(0.05, delta_v + 0.04)
+    fig_cells.update_layout(
+        title="Individual Cell Terminal Voltages (V₁ — V₄)",
+        xaxis_title="Cell ID",
+        yaxis_title="Terminal Voltage (V)",
+        yaxis=dict(range=[v_min - y_pad, v_max + y_pad + 0.06]),
+        template=plotly_template,
+        height=320,
+        margin=dict(l=50, r=30, t=50, b=40),
+        showlegend=False,
+        bargap=0.35,
+    )
+
+    cell_chart_col, cell_metrics_col = st.columns([1.6, 1], gap="large")
+
+    with cell_chart_col:
+        st.plotly_chart(fig_cells, use_container_width=True)
+
+    with cell_metrics_col:
+        st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+
+        # ΔV imbalance status card
+        st.markdown(
+            f"""
+            <div style="background: {imbal_bg}; border: 1.5px solid {imbal_border};
+                        border-radius: 14px; padding: 16px 18px; margin-bottom: 14px;">
+                <div style="font-size: 0.72rem; font-weight: 700; color: var(--text-muted);
+                            text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px;">
+                    ΔV Imbalance Status
+                </div>
+                <div style="font-family: 'Rajdhani', sans-serif; font-size: 2rem;
+                            font-weight: 700; color: {imbal_color}; line-height: 1.1;">
+                    {delta_v:.4f} V
+                </div>
+                <div style="font-size: 0.84rem; font-weight: 700; color: {imbal_color};
+                            margin: 3px 0 6px 0;">
+                    {imbal_label}
+                </div>
+                <div style="font-size: 0.77rem; color: var(--text-secondary); line-height: 1.45;">
+                    {imbal_desc}
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        # Per-cell voltage breakdown cards
+        for idx, (label_short, cv) in enumerate(zip(["V₁", "V₂", "V₃", "V₄"], cell_voltages)):
+            dev = round(cv - v_mean, 4)
+            dev_color = "#dc2626" if abs(dev) > 0.15 else "#d97706" if abs(dev) > 0.05 else "#16a34a"
+            dev_sign  = "+" if dev >= 0 else ""
+            fault_tag = " ⚠ FAULT" if inject_fault and idx == 2 else ""
+            st.markdown(
+                f"""
+                <div style="background: var(--bg-card-sub); border: 1px solid var(--border-color);
+                            border-radius: 9px; padding: 8px 12px; margin-bottom: 6px;
+                            display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.82rem;
+                                     font-weight: 700; color: var(--text-muted);">
+                            Cell {idx + 1} ({label_short}){fault_tag}
+                        </span>
+                    </div>
+                    <div style="text-align: right;">
+                        <div style="font-family: 'Rajdhani', sans-serif; font-size: 1.15rem;
+                                    font-weight: 700; color: var(--text-primary);">{cv:.4f} V</div>
+                        <div style="font-size: 0.73rem; font-weight: 700; color: {dev_color};">
+                            {dev_sign}{dev:.4f} V vs V̄
+                        </div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    # Propagation traceability summary footer
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+    st.markdown(
+        f"""
+        <div style="background: var(--bg-card-sub); border: 1px solid var(--border-color);
+                    border-radius: 10px; padding: 11px 18px; display: flex; gap: 28px;
+                    flex-wrap: wrap; align-items: center;">
+            <div style="font-size: 0.75rem; font-weight: 700; color: var(--text-muted);">
+                📐 TRACEABILITY METRICS
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
+                        color: var(--text-secondary); line-height: 1.5;">
+                V̄ mean = <b>{v_mean:.4f} V</b>
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
+                        color: var(--text-secondary); line-height: 1.5;">
+                V_max = <b style="color: #16a34a;">{v_max:.4f} V</b>
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
+                        color: var(--text-secondary); line-height: 1.5;">
+                V_min = <b style="color: {'#dc2626' if inject_fault else '#d97706'};">{v_min:.4f} V</b>
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
+                        color: {imbal_color}; font-weight: 700; line-height: 1.5;">
+                ΔV = {delta_v:.4f} V &nbsp;|&nbsp; {imbal_label}
+            </div>
+            <div style="font-size: 0.73rem; color: var(--text-muted);">
+                Source: {'Fault-Injected' if inject_fault else 'Live Telemetry Derived'}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# =========================================================
+# TAB 6: 32-CELL BATTERY MATRIX
 # =========================================================
 with tab_cells:
     st.markdown("### 🔋 32-Cell Series-Parallel Matrix Architecture")
@@ -1531,7 +2479,7 @@ with tab_cells:
         st.metric("Balancing Shunt", "ENGAGED" if target['balancing'] else "PASSIVE")
 
 # =========================================================
-# TAB 4: ELECTROCHEMICAL & PINN ANALYTICS
+# TAB 7: ELECTROCHEMICAL & PINN ANALYTICS
 # =========================================================
 with tab_charts:
     st.markdown("### 📈 Electrochemical Kinetics & PINN Degradation Analytics")
@@ -1609,7 +2557,7 @@ with tab_charts:
         st.plotly_chart(fig_deg, width="stretch")
 
 # =========================================================
-# TAB 5: CAN BUS STREAM & DIAGNOSTICS
+# TAB 8: CAN BUS STREAM & DIAGNOSTICS
 # =========================================================
 with tab_can:
     st.markdown("### 📡 Live CAN Bus Packet Decoder (can0 @ 250 kbps)")
@@ -1650,7 +2598,7 @@ with tab_can:
     st.table(pd.DataFrame(can_packets))
 
 # =========================================================
-# TAB 6: ESP32 HARDWARE & DEPLOYMENT GUIDE
+# TAB 9: ESP32 HARDWARE & DEPLOYMENT GUIDE
 # =========================================================
 with tab_guide:
     st.markdown("### 🔌 ESP32 Microcontroller & Network Telemetry Guide")
