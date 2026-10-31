@@ -349,6 +349,25 @@ mqtt_mgr = get_mqtt_manager()
 with st.sidebar:
     st.markdown("### 🏎️ DRIVER COCKPIT CONTROLS")
 
+    st.markdown("#### Dashboard Views")
+    dashboard_sections = [
+        "⚡ Live Telemetry",
+        "🚗 Driver Cockpit",
+        "⚡ Pack Configurator",
+        "📊 Multi-Physics",
+        "🛡️ Risk & Traceability",
+        "🔋 Cell Matrix",
+        "📈 PINN Analytics",
+        "📋 CAN Diagnostics",
+        "🚀 Hardware & Deployment",
+    ]
+    selected_dashboard_section = st.radio(
+        "Navigate",
+        options=dashboard_sections,
+        label_visibility="collapsed",
+    )
+
+    st.markdown("---")
     # Theme Toggle Switch in Sidebar
     theme_choice = st.radio(
         "Display Mode",
@@ -434,14 +453,6 @@ with st.sidebar:
             value=False,
             help="Generates synthetic 500ms battery packets internally into the UDP pipeline to preview live gauges and graphs.",
         )
-        if sim_udp_toggle:
-            t_now = time.time()
-            v_mock = 792.0 + math.sin(t_now * 1.5) * 6.0 + random.uniform(-0.5, 0.5)
-            i_mock = -34.0 + math.sin(t_now * 0.9) * 28.0 + math.cos(t_now * 2.1) * 8.0
-            t_mock = 31.0 + (abs(i_mock) / 50.0) * 1.2
-            soc_mock = max(10.0, 84.5 - ((t_now % 300) / 300) * 5.0)
-            soh_mock = 98.40
-            udp_mgr.push_simulated_packet(v_mock, i_mock, t_mock, soc_mock, soh_mock)
     else:
         st.markdown("---")
         st.markdown("#### 📡 MQTT Pipeline Diagnostics")
@@ -460,14 +471,6 @@ with st.sidebar:
             value=False,
             help="Generates synthetic 500ms battery packets internally into the MQTT pipeline.",
         )
-        if sim_mock_toggle:
-            t_now = time.time()
-            v_mock = 792.0 + math.sin(t_now * 1.5) * 6.0 + random.uniform(-0.5, 0.5)
-            i_mock = -34.0 + math.sin(t_now * 0.9) * 28.0 + math.cos(t_now * 2.1) * 8.0
-            t_mock = 31.0 + (abs(i_mock) / 50.0) * 1.2
-            soc_mock = max(10.0, 84.5 - ((t_now % 300) / 300) * 5.0)
-            soh_mock = 98.40
-            mqtt_mgr.push_simulated_packet(v_mock, i_mock, t_mock, soc_mock, soh_mock)
 
     total_capacity_kwh = st.number_input("Pack Capacity (kWh)", min_value=40.0, max_value=200.0, value=100.0, step=5.0)
 
@@ -923,30 +926,111 @@ st.markdown(
 )
 
 # ---------------------------------------------------------
-# 7. Streamlit Navigation Tabs
+# Shared telemetry state and live summary for sidebar views
 # ---------------------------------------------------------
-tab_telemetry, tab_cockpit, tab_configurator, tab_tradeoffs, tab_risk, tab_cells, tab_charts, tab_can, tab_guide = st.tabs([
-    "⚡ Live Telemetry (UDP / MQTT)",
-    "🚗 Driver HUD & High-Voltage Chassis",
-    "⚡ Pack Configurator",
-    "📊 Multi-Physics Trade-Offs",
-    "🛡️ Risk & Traceability",
-    "🔋 32-Cell Battery Matrix",
-    "📈 Electrochemical & PINN Analytics",
-    "📋 CAN Bus Stream & Diagnostics",
-    "🚀 ESP32 Hardware & Deployment",
-])
+# Resolve a shared telemetry snapshot so every sidebar view uses the same inputs.
+if is_manual_mode:
+    eff_voltage = slider_voltage
+    eff_current = slider_current
+    eff_temp = slider_temp
+    eff_soc = slider_soc
+else:
+    telemetry_manager = udp_mgr if is_udp_mode else mqtt_mgr
+    snap_data, *_ = telemetry_manager.get_snapshot()
+    eff_voltage = snap_data["packVoltage"]
+    eff_current = snap_data["packCurrent"]
+    eff_temp = snap_data["cellTemp"]
+    eff_soc = snap_data["SoC"]
+
+if inject_fault:
+    eff_voltage = min(eff_voltage, 738.0)
+    eff_temp = max(eff_temp, 54.2)
+
+pinn_res = compute_pinn_digital_twin(
+    eff_voltage, eff_current, eff_temp, eff_soc, session=onnx_session
+)
+if inject_fault:
+    pinn_res["degradation_risk"] = 0.742
+    pinn_res["soh"] = round(pinn_res["soh"] - 5.2, 2)
+    pinn_res["rul_cycles"] = max(200, pinn_res["rul_cycles"] - 380)
+
+
+def render_live_summary():
+    @st.fragment(run_every=1)
+    def render():
+        update_mock_stream()
+
+        if is_manual_mode:
+            voltage = slider_voltage
+            current = slider_current
+            temperature = slider_temp
+            soc = slider_soc
+        else:
+            manager = udp_mgr if is_udp_mode else mqtt_mgr
+            data, *_ = manager.get_snapshot()
+            voltage = data["packVoltage"]
+            current = data["packCurrent"]
+            temperature = data["cellTemp"]
+            soc = data["SoC"]
+
+        if inject_fault:
+            voltage = min(voltage, 738.0)
+            temperature = max(temperature, 54.2)
+
+        live_result = compute_pinn_digital_twin(
+            voltage, current, temperature, soc, session=onnx_session
+        )
+        if inject_fault:
+            live_result["degradation_risk"] = 0.742
+
+        metrics = st.columns(4)
+        metrics[0].metric("Pack Voltage", f"{voltage:.1f} V")
+        metrics[1].metric("Pack Current", f"{current:.1f} A")
+        metrics[2].metric(
+            "Core Temperature",
+            f"{temperature:.1f} °C",
+            delta="Thermal alert" if temperature > 45 else "Nominal",
+            delta_color="inverse" if temperature > 45 else "normal",
+        )
+        metrics[3].metric("PINN Risk", f"{live_result['degradation_risk']:.1%}")
+
+    render()
+
+
+def update_mock_stream():
+    if is_udp_mode and sim_udp_toggle:
+        t_now = time.time()
+        i_mock = -34.0 + math.sin(t_now * 0.9) * 28.0 + math.cos(t_now * 2.1) * 8.0
+        udp_mgr.push_simulated_packet(
+            792.0 + math.sin(t_now * 1.5) * 6.0 + random.uniform(-0.5, 0.5),
+            i_mock,
+            31.0 + (abs(i_mock) / 50.0) * 1.2,
+            max(10.0, 84.5 - ((t_now % 300) / 300) * 5.0),
+            98.40,
+        )
+    elif is_mqtt_mode and sim_mock_toggle:
+        t_now = time.time()
+        i_mock = -34.0 + math.sin(t_now * 0.9) * 28.0 + math.cos(t_now * 2.1) * 8.0
+        mqtt_mgr.push_simulated_packet(
+            792.0 + math.sin(t_now * 1.5) * 6.0 + random.uniform(-0.5, 0.5),
+            i_mock,
+            31.0 + (abs(i_mock) / 50.0) * 1.2,
+            max(10.0, 84.5 - ((t_now % 300) / 300) * 5.0),
+            98.40,
+        )
 
 # =========================================================
 # TAB 1: REAL-TIME TELEMETRY PIPELINE (UDP / MQTT Dynamic Fragment)
 # =========================================================
-with tab_telemetry:
+if selected_dashboard_section == "⚡ Live Telemetry":
     st.markdown("### ⚡ Real-Time Battery Telemetry Dashboard")
     st.caption("Listening on UDP port `4210` & MQTT `nevora/battery/telemetry`. Updating dynamically without full page reloads.")
 
     # Isolated dynamic fragment: reruns every 500ms without reloading the entire page!
     @st.fragment(run_every=0.5)
     def render_live_telemetry_fragment():
+        update_mock_stream()
+
         # Retrieve snapshot according to selected telemetry source
         if is_manual_mode:
             v_val = slider_voltage
@@ -1282,20 +1366,7 @@ with tab_telemetry:
 # =========================================================
 # TAB 2: DRIVER HUD & HIGH-VOLTAGE CHASSIS
 # =========================================================
-with tab_cockpit:
-    # Use latest telemetry snapshot for chassis computations
-    snap_data_chassis = udp_mgr.latest_data if is_udp_mode else mqtt_mgr.latest_data
-    eff_voltage = snap_data_chassis["packVoltage"] if not inject_fault else min(snap_data_chassis["packVoltage"], 738.0)
-    eff_current = snap_data_chassis["packCurrent"]
-    eff_temp = snap_data_chassis["cellTemp"] if not inject_fault else max(snap_data_chassis["cellTemp"], 54.2)
-    eff_soc = snap_data_chassis["SoC"]
-
-    pinn_res = compute_pinn_digital_twin(eff_voltage, eff_current, eff_temp, eff_soc, session=onnx_session)
-    if inject_fault:
-        pinn_res["degradation_risk"] = 0.742
-        pinn_res["soh"] = round(pinn_res["soh"] - 5.2, 2)
-        pinn_res["rul_cycles"] = max(200, pinn_res["rul_cycles"] - 380)
-
+if selected_dashboard_section == "🚗 Driver Cockpit":
     estimated_range_km = int(round((eff_soc / 100.0) * 580))
     power_kw = round((eff_voltage * eff_current) / 1000.0, 1)
     coolant_flow = 28.0 if inject_fault else round(14.5 + max(0.0, (eff_temp - 30.0) * 0.45), 1)
@@ -1445,16 +1516,26 @@ with tab_cockpit:
 # =========================================================
 # TAB 3: PACK CONFIGURATOR (Virtual Pack Design & Sizing)
 # =========================================================
-with tab_configurator:
-    st.markdown("### ⚡ Virtual Battery Pack Configurator")
-    st.caption("Virtually design, architect, and size an EV battery pack in real time based on cell electrochemistry, series-parallel topology, and thermal cooling.")
+if selected_dashboard_section == "⚡ Pack Configurator":
+    st.markdown("### ⚡ Battery Energy System Configurator")
+    st.caption("Virtually design, architect, and size an EV/BESS battery pack in real time based on cell electrochemistry, series-parallel topology, and thermal cooling.")
+
+    # Multi-Factor Second-Life Battery Grading Rules Definition
+    def grade_second_life(soh, delta_r_mOhm, cell_imbalance_mV):
+        if soh >= 80.0 and delta_r_mOhm < 10.0 and cell_imbalance_mV < 20:
+            return "1st-Life EV Traction Certified"
+        elif 70.0 <= soh < 80.0 and delta_r_mOhm < 25.0 and cell_imbalance_mV < 50:
+            return "2nd-Life Stationary BESS Storage Certified (Solar/Grid)"
+        elif soh < 70.0 or delta_r_mOhm >= 25.0 or cell_imbalance_mV >= 50:
+            return "Recycling & Material Recovery Required (E-Waste Prevention)"
+        return "Inspection Required"
 
     # Cell chemistry electrochemical parameter mapping
     chem_specs = {
-        "NMC (3.7V, 2.5Ah)": {
+        "NMC811 (3.7V, 2.5Ah)": {
             "v_nominal": 3.7,
             "c_cell": 2.5,
-            "family": "Lithium Nickel Manganese Cobalt",
+            "family": "Lithium Nickel Manganese Cobalt (811)",
             "density_desc": "High Energy Density",
         },
         "LFP (3.2V, 3.2Ah)": {
@@ -1480,59 +1561,55 @@ with tab_configurator:
     with col_input:
         with st.container(border=True):
             st.markdown("#### 🛠️ Pack Architecture & Input Parameters")
-            st.caption("Configure series-parallel topological strings, cell chemistry, and cooling system.")
+            st.caption("Configure series-parallel topological strings, cell chemistry, and cooling strategy.")
 
-            cell_chem = st.selectbox(
-                "Cell Chemistry",
-                options=[
-                    "NMC (3.7V, 2.5Ah)",
-                    "LFP (3.2V, 3.2Ah)",
-                    "LTO (2.3V, 1.5Ah)",
-                ],
+            chem = st.selectbox(
+                "Select Cell Chemistry",
+                options=["NMC811 (3.7V, 2.5Ah)", "LFP (3.2V, 3.2Ah)", "LTO (2.3V, 1.5Ah)"],
                 index=0,
-                help="Select cell electrochemistry to set nominal voltage ($V_{\\text{nominal}}$) and unit capacity ($C_{\\text{cell}}$).",
+                help="Select cell electrochemistry to set nominal voltage (V_cell) and unit capacity (Ah_cell).",
             )
 
-            s_cells = st.slider(
-                "Series Cells ($S$)",
-                min_value=1,
-                max_value=96,
-                value=10,
+            ns = st.slider(
+                "Series Cells (Ns)",
+                min_value=12,
+                max_value=216,
+                value=96,
                 step=1,
-                help="Number of series cells ($S$). Directly determines total pack voltage.",
+                help="Number of series cells (Ns). Directly determines total pack voltage.",
             )
 
-            p_cells = st.slider(
-                "Parallel Cells ($P$)",
+            np_cells = st.slider(
+                "Parallel Cells (Np)",
                 min_value=1,
-                max_value=30,
+                max_value=20,
                 value=4,
                 step=1,
-                help="Number of parallel cells ($P$). Directly determines total pack capacity.",
+                help="Number of parallel cells (Np). Directly determines total pack capacity.",
             )
 
-            cooling_type = st.selectbox(
-                "Thermal Cooling Type",
-                options=["Passive Air", "Forced Air", "Liquid Cooling"],
+            cooling = st.selectbox(
+                "Cooling Strategy",
+                options=["Passive Air", "Forced Air", "Liquid Cold-Plate"],
                 index=2,
                 help="Active or passive thermal heat rejection mechanism.",
             )
 
             # Selected Cell & Topology Breakdown Card
-            selected_spec = chem_specs[cell_chem]
-            total_cells = s_cells * p_cells
+            selected_spec = chem_specs[chem]
+            total_cells = ns * np_cells
             st.markdown("---")
             st.markdown(
                 f"""
                 <div style="background: var(--bg-card-sub); border: 1px solid var(--border-color); border-radius: 10px; padding: 12px 16px;">
                     <div style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Topological Summary</div>
                     <div style="font-family: 'Rajdhani', sans-serif; font-size: 1.35rem; font-weight: 700; color: var(--accent-primary);">
-                        {s_cells}S{p_cells}P Matrix ({total_cells} Cells Total)
+                        {ns}S{np_cells}P Matrix ({total_cells} Cells Total)
                     </div>
                     <div style="font-size: 0.82rem; color: var(--text-secondary); margin-top: 4px; line-height: 1.5;">
                         • <b>Cell Rating:</b> {selected_spec['v_nominal']} V nom &bull; {selected_spec['c_cell']} Ah unit<br>
                         • <b>Chemistry:</b> {selected_spec['family']} ({selected_spec['density_desc']})<br>
-                        • <b>Thermal Regime:</b> {cooling_type} Management
+                        • <b>Thermal Regime:</b> {cooling} Management
                     </div>
                 </div>
                 """,
@@ -1542,21 +1619,15 @@ with tab_configurator:
     # -----------------------------------------------------
     # Real-Time Engineering Computations
     # -----------------------------------------------------
-    v_nominal = chem_specs[cell_chem]["v_nominal"]
-    c_cell = chem_specs[cell_chem]["c_cell"]
+    v_cell = 3.7 if "NMC811" in chem else (3.2 if "LFP" in chem else 2.3)
+    ah_cell = 2.5 if "NMC811" in chem else (3.2 if "LFP" in chem else 1.5)
 
-    # Formulas:
-    # V_pack = S * V_nominal
-    # C_pack = P * C_cell
-    # E_kWh = (V_pack * C_pack) / 1000
-    # M = (S * P * 0.070) * 1.25 factor
-    # Cost = (S * P * $3.50) * 1.3 factor
-    v_pack = s_cells * v_nominal
-    c_pack = p_cells * c_cell
-    e_kwh = (v_pack * c_pack) / 1000.0
-    pack_mass_kg = (s_cells * p_cells * 0.070) * 1.25
-    pack_cost_usd = (s_cells * p_cells * 3.50) * 1.30
-    energy_density_wh_kg = (e_kwh * 1000.0) / pack_mass_kg if pack_mass_kg > 0 else 0.0
+    v_pack = ns * v_cell
+    cap_pack = np_cells * ah_cell
+    energy_kwh = (v_pack * cap_pack) / 1000.0
+    est_mass_kg = (ns * np_cells * 0.070) * 1.3  # 70g cell + 30% packaging overhead
+    est_cost_usd = (ns * np_cells * 3.50) * 1.25
+    energy_density_wh_kg = (energy_kwh * 1000.0) / est_mass_kg if est_mass_kg > 0 else 0.0
 
     # -----------------------------------------------------
     # Column 2: Pack Sizing Outputs (st.metric Real-time Cards)
@@ -1566,41 +1637,20 @@ with tab_configurator:
             st.markdown("#### 📊 Pack Sizing & Real-Time Engineering Metrics")
             st.caption("Live engineering sizing estimations calculated from physical topology and cost models:")
 
-            # Metric Cards Row 1: Voltage and Capacity
-            m_col1, m_col2 = st.columns(2)
-            with m_col1:
-                st.metric(
-                    label="Total Pack Voltage ($V_{\\text{pack}}$)",
-                    value=f"{v_pack:.1f} V",
-                    delta=f"{s_cells} × {v_nominal:.1f} V nom",
-                    delta_color="normal",
-                )
-            with m_col2:
-                st.metric(
-                    label="Total Pack Capacity ($C_{\\text{pack}}$)",
-                    value=f"{c_pack:.1f} Ah",
-                    delta=f"{p_cells} × {c_cell:.1f} Ah unit",
-                    delta_color="normal",
-                )
+            # Metric Cards Row 1: Voltage, Capacity, Energy, Mass (4 columns)
+            col1, col2 = st.columns(2)
+            with col1:
+                col1.metric("Pack Voltage", f"{v_pack:.1f} V", delta=f"{ns} × {v_cell:.1f} V nom")
+            with col2:
+                col2.metric("Pack Capacity", f"{cap_pack:.1f} Ah", delta=f"{np_cells} × {ah_cell:.1f} Ah unit")
 
             st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
-            # Metric Cards Row 2: Energy and Mass
-            m_col3, m_col4 = st.columns(2)
-            with m_col3:
-                st.metric(
-                    label="Total Pack Energy ($E_{\\text{kWh}}$)",
-                    value=f"{e_kwh:.3f} kWh",
-                    delta=f"{(e_kwh * 1000):.1f} Wh total",
-                    delta_color="normal",
-                )
-            with m_col4:
-                st.metric(
-                    label="Estimated Pack Mass",
-                    value=f"{pack_mass_kg:.2f} kg",
-                    delta="1.25× Enclosure Factor",
-                    delta_color="off",
-                )
+            col3, col4 = st.columns(2)
+            with col3:
+                col3.metric("Pack Energy", f"{energy_kwh:.2f} kWh", delta=f"{(energy_kwh * 1000):.1f} Wh total")
+            with col4:
+                col4.metric("Est. Mass", f"{est_mass_kg:.1f} kg", delta="1.30× Packaging Overhead", delta_color="off")
 
             st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
@@ -1609,15 +1659,15 @@ with tab_configurator:
             with m_col5:
                 st.metric(
                     label="Estimated Pack BOM Cost",
-                    value=f"${pack_cost_usd:,.2f}",
-                    delta="1.3× BOM Factor ($3.50/cell)",
+                    value=f"${est_cost_usd:,.2f}",
+                    delta="1.25× Cost Factor ($3.50/cell)",
                     delta_color="off",
                 )
             with m_col6:
                 st.metric(
                     label="Gravimetric Energy Density",
                     value=f"{energy_density_wh_kg:.1f} Wh/kg",
-                    delta=f"{cooling_type} System",
+                    delta=f"{cooling} Strategy",
                     delta_color="normal",
                 )
 
@@ -1628,26 +1678,81 @@ with tab_configurator:
                 <div style="background: var(--bg-card-sub); border: 1px solid var(--border-color); border-radius: 10px; padding: 12px 16px;">
                     <div style="font-size: 0.74rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; margin-bottom: 4px;">Engineering Sizing Formulations</div>
                     <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; line-height: 1.6; color: var(--text-secondary);">
-                        • <b>V<sub>pack</sub>:</b> S × V<sub>nom</sub> = {s_cells} × {v_nominal:.1f}V = <span style="color: var(--accent-primary); font-weight: 700;">{v_pack:.1f} V</span><br>
-                        • <b>C<sub>pack</sub>:</b> P × C<sub>cell</sub> = {p_cells} × {c_cell:.1f}Ah = <span style="color: var(--accent-primary); font-weight: 700;">{c_pack:.1f} Ah</span><br>
-                        • <b>E<sub>kWh</sub>:</b> (V<sub>pack</sub> × C<sub>pack</sub>) / 1000 = <span style="color: var(--accent-green); font-weight: 700;">{e_kwh:.3f} kWh</span><br>
-                        • <b>Mass (kg):</b> (S × P × 0.070) × 1.25 = <span style="color: var(--text-primary); font-weight: 700;">{pack_mass_kg:.2f} kg</span><br>
-                        • <b>BOM Cost:</b> (S × P × $3.50) × 1.30 = <span style="color: var(--text-primary); font-weight: 700;">${pack_cost_usd:,.2f}</span>
+                        • <b>V<sub>pack</sub>:</b> Ns × V<sub>cell</sub> = {ns} × {v_cell:.1f}V = <span style="color: var(--accent-primary); font-weight: 700;">{v_pack:.1f} V</span><br>
+                        • <b>Cap<sub>pack</sub>:</b> Np × Ah<sub>cell</sub> = {np_cells} × {ah_cell:.1f}Ah = <span style="color: var(--accent-primary); font-weight: 700;">{cap_pack:.1f} Ah</span><br>
+                        • <b>Energy<sub>kWh</sub>:</b> (V<sub>pack</sub> × Cap<sub>pack</sub>) / 1000 = <span style="color: var(--accent-green); font-weight: 700;">{energy_kwh:.2f} kWh</span><br>
+                        • <b>Mass (kg):</b> (Ns × Np × 0.070) × 1.30 = <span style="color: var(--text-primary); font-weight: 700;">{est_mass_kg:.1f} kg</span><br>
+                        • <b>BOM Cost:</b> (Ns × Np × $3.50) × 1.25 = <span style="color: var(--text-primary); font-weight: 700;">${est_cost_usd:,.2f}</span>
                     </div>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
+    st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
+
+    # -----------------------------------------------------
+    # Multi-Factor Second-Life Battery Grading Console
+    # -----------------------------------------------------
+    with st.container(border=True):
+        st.markdown("#### ♻️ Multi-Factor Second-Life Battery Grading & Circular Economy")
+        st.caption("Automated lifecycle re-certification rules based on capacity retention (SOH), impedance growth (ΔR), and cell voltage imbalance (ΔV).")
+
+        sl_col1, sl_col2, sl_col3 = st.columns(3)
+        with sl_col1:
+            eval_soh = st.slider("Battery State of Health (SOH %)", min_value=40.0, max_value=100.0, value=82.5, step=0.5,
+                                 help="Current state of health capacity retention percentage.")
+        with sl_col2:
+            eval_delta_r = st.slider("Internal Resistance Rise ΔR (mΩ)", min_value=0.0, max_value=40.0, value=6.5, step=0.5,
+                                     help="Growth in internal cell ESR compared to beginning of life (BOL).")
+        with sl_col3:
+            eval_imbalance_mv = st.slider("Cell-to-Cell Imbalance ΔV (mV)", min_value=0, max_value=80, value=14, step=1,
+                                          help="Maximum voltage difference between cells in the pack in millivolts.")
+
+        certification_result = grade_second_life(eval_soh, eval_delta_r, eval_imbalance_mv)
+
+        # Style output banner based on certificate category
+        if "1st-Life" in certification_result:
+            grade_color = "#16a34a"
+            grade_icon = "🚗"
+            grade_badge = "TIER 1 • AUTOMOTIVE TRACTION"
+            grade_desc = "Optimal state of health and low internal resistance. Fully certified for demanding high-voltage EV road traction and dynamic regenerative acceleration."
+            st.success(f"{grade_icon} **{certification_result}** — {grade_badge}")
+        elif "2nd-Life" in certification_result:
+            grade_color = "#d97706"
+            grade_icon = "🔋"
+            grade_badge = "TIER 2 • STATIONARY BESS STORAGE"
+            grade_desc = "Capacity or impedance has degraded beyond high-C-rate automotive specs, but remains ideal for stationary grid storage, solar PV buffering, and commercial microgrids."
+            st.warning(f"{grade_icon} **{certification_result}** — {grade_badge}")
+        else:
+            grade_color = "#dc2626"
+            grade_icon = "♻️"
+            grade_badge = "TIER 3 • RECYCLING & MATERIAL HARVESTING"
+            grade_desc = "Substantial cell degradation, elevated impedance, or unsafe cell imbalance detected. Battery should be retired from service and routed for hydrometallurgical material recovery (Lithium, Nickel, Cobalt, Copper recycling)."
+            st.error(f"{grade_icon} **{certification_result}** — {grade_badge}")
+
+        st.markdown(
+            f"""
+            <div style="background: var(--bg-card-sub); border-left: 4px solid {grade_color}; border-radius: 8px; padding: 10px 14px; font-size: 0.83rem; color: var(--text-secondary); line-height: 1.5;">
+                <b>Certification Assessment:</b> {grade_desc}<br>
+                <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.76rem; color: var(--text-muted);">
+                    Evaluated: SOH = {eval_soh:.1f}% | ΔR = {eval_delta_r:.1f} mΩ | ΔV Imbalance = {eval_imbalance_mv} mV
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
 # =========================================================
 # TAB 4: MULTI-PHYSICS TRADE-OFFS
 # =========================================================
-with tab_tradeoffs:
+if selected_dashboard_section == "📊 Multi-Physics":
     st.markdown("### 📊 Multi-Physics Battery Pack Trade-Off Analysis")
     st.caption(
         "Interactive radar benchmarking, configuration comparison table, and C-Rate thermal simulation "
         "across **Config A — High Energy NMC** vs **Config B — High Safety LFP** pack architectures."
     )
+    render_live_summary()
 
     # -----------------------------------------------------------------
     # Section 1: Radar / Spider Chart — 5 Core Battery Parameters
@@ -2050,17 +2155,18 @@ with tab_tradeoffs:
 # =========================================================
 # TAB 5: RISK & TRACEABILITY
 # =========================================================
-with tab_risk:
+if selected_dashboard_section == "🛡️ Risk & Traceability":
     st.markdown("### 🛡️ Risk Assessment & Battery Traceability Console")
     st.caption(
         "Rule-based safety diagnostics evaluated against live telemetry, plus cell-level "
         "voltage imbalance tracking for propagation traceability."
     )
+    render_live_summary()
 
     # ------------------------------------------------------------------
     # Pull live telemetry for risk evaluation
     # ------------------------------------------------------------------
-    # Re-use the already-resolved eff_voltage / eff_temp computed in Tab 2.
+    # Re-use the shared live telemetry values resolved for the active view.
     # Guard: if user is in Manual Slider mode the sidebar sliders are live.
     if is_manual_mode:
         risk_voltage = slider_voltage
@@ -2390,9 +2496,10 @@ with tab_risk:
 # =========================================================
 # TAB 6: 32-CELL BATTERY MATRIX
 # =========================================================
-with tab_cells:
+if selected_dashboard_section == "🔋 Cell Matrix":
     st.markdown("### 🔋 32-Cell Series-Parallel Matrix Architecture")
     st.caption("4 High-Voltage Modules (MOD-A, MOD-B, MOD-C, MOD-D) with individual cell voltage, thermal gradient, and balancing shunts.")
+    render_live_summary()
 
     module_filter = st.radio(
         "Module Filter",
@@ -2400,7 +2507,7 @@ with tab_cells:
         horizontal=True,
     )
 
-    np.random.seed(42)
+    rng = np.random.default_rng()
     modules = ["MOD-A", "MOD-B", "MOD-C", "MOD-D"]
     cell_data = []
 
@@ -2408,7 +2515,7 @@ with tab_cells:
         mod_index = (i - 1) // 8
         mod_name = modules[mod_index]
 
-        jitter = (np.random.rand() - 0.5) * 0.008 if enable_jitter else 0.0
+        jitter = (rng.random() - 0.5) * 0.008 if enable_jitter else 0.0
         v_cell = round(4.12 + math.sin(i * 1.7) * 0.03 + jitter, 3)
         t_cell = round(eff_temp + math.cos(i) * 1.4, 1)
         r_cell = round(1.35 + (i % 5) * 0.05, 2)
@@ -2481,7 +2588,7 @@ with tab_cells:
 # =========================================================
 # TAB 7: ELECTROCHEMICAL & PINN ANALYTICS
 # =========================================================
-with tab_charts:
+if selected_dashboard_section == "📈 PINN Analytics":
     st.markdown("### 📈 Electrochemical Kinetics & PINN Degradation Analytics")
     g_col1, g_col2 = st.columns(2)
 
@@ -2559,7 +2666,7 @@ with tab_charts:
 # =========================================================
 # TAB 8: CAN BUS STREAM & DIAGNOSTICS
 # =========================================================
-with tab_can:
+if selected_dashboard_section == "📋 CAN Diagnostics":
     st.markdown("### 📡 Live CAN Bus Packet Decoder (can0 @ 250 kbps)")
     st.caption("Decoded CAN frames generated in synchronization with C++ embedded worker (src/can_reader.cpp).")
 
@@ -2600,7 +2707,7 @@ with tab_can:
 # =========================================================
 # TAB 9: ESP32 HARDWARE & DEPLOYMENT GUIDE
 # =========================================================
-with tab_guide:
+if selected_dashboard_section == "🚀 Hardware & Deployment":
     st.markdown("### 🔌 ESP32 Microcontroller & Network Telemetry Guide")
 
     col_g1, col_g2 = st.columns(2)

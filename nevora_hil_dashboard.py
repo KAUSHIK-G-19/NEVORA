@@ -542,11 +542,21 @@ with tab_hil:
 # ║  TAB 2 — PACK CONFIGURATOR                                              ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 with tab_cfg:
-    st.markdown("### ⚡ Virtual Battery Pack Configurator")
-    st.caption("Design and size an EV battery pack in real time — chemistry, topology, thermal management.")
+    st.markdown("### ⚡ Battery Energy System Configurator")
+    st.caption("Virtually design, architect, and size an EV/BESS battery pack in real time based on cell electrochemistry, series-parallel topology, and thermal cooling.")
+
+    # Multi-Factor Second-Life Battery Grading Rules
+    def grade_second_life(soh, delta_r_mOhm, cell_imbalance_mV):
+        if soh >= 80.0 and delta_r_mOhm < 10.0 and cell_imbalance_mV < 20:
+            return "1st-Life EV Traction Certified"
+        elif 70.0 <= soh < 80.0 and delta_r_mOhm < 25.0 and cell_imbalance_mV < 50:
+            return "2nd-Life Stationary BESS Storage Certified (Solar/Grid)"
+        elif soh < 70.0 or delta_r_mOhm >= 25.0 or cell_imbalance_mV >= 50:
+            return "Recycling & Material Recovery Required (E-Waste Prevention)"
+        return "Inspection Required"
 
     CHEM = {
-        "NMC (3.7V, 2.5Ah)": {"v": 3.7, "c": 2.5, "family": "Lithium Nickel Manganese Cobalt"},
+        "NMC811 (3.7V, 2.5Ah)": {"v": 3.7, "c": 2.5, "family": "Lithium Nickel Manganese Cobalt (811)"},
         "LFP (3.2V, 3.2Ah)": {"v": 3.2, "c": 3.2, "family": "Lithium Iron Phosphate"},
         "LTO (2.3V, 1.5Ah)": {"v": 2.3, "c": 1.5, "family": "Lithium Titanate Oxide"},
     }
@@ -556,16 +566,17 @@ with tab_cfg:
     with col1:
         with st.container(border=True):
             st.markdown("#### 🛠️ Pack Architecture Inputs")
-            chem    = st.selectbox("Cell Chemistry",
-                                   options=list(CHEM))
-            S       = st.slider("Series Cells (S)",   1, 96, 10)
-            P       = st.slider("Parallel Cells (P)", 1, 30,  4)
-            cooling = st.selectbox("Cooling System",
-                                   ["Passive Air", "Forced Air", "Liquid Cooling"],
-                                   index=2)
+            chem = st.selectbox("Select Cell Chemistry", options=list(CHEM), index=0)
+            ns = st.slider("Series Cells (Ns)", min_value=12, max_value=216, value=96)
+            np_cells = st.slider("Parallel Cells (Np)", min_value=1, max_value=20, value=4)
+            cooling = st.selectbox("Cooling Strategy", ["Passive Air", "Forced Air", "Liquid Cold-Plate"], index=2)
 
-            spec  = CHEM[chem]
-            total = S * P
+            # Compatibility aliases for downstream tabs
+            S = ns
+            P = np_cells
+
+            spec = CHEM[chem]
+            total = ns * np_cells
             st.markdown("---")
             st.markdown(
                 f"""
@@ -573,7 +584,7 @@ with tab_cfg:
                     <div class="tile-lbl">Topological String</div>
                     <div style="font-family:'Rajdhani',sans-serif;font-size:1.4rem;
                                 font-weight:700;color:var(--cyan);">
-                        {S}S{P}P Matrix &mdash; {total} cells
+                        {ns}S{np_cells}P Matrix &mdash; {total} cells
                     </div>
                     <div class="tile-sub">
                         {spec['v']} V nom &bull; {spec['c']} Ah &bull; {spec['family']}<br>
@@ -584,31 +595,41 @@ with tab_cfg:
                 unsafe_allow_html=True,
             )
 
-    # ── Core calculations (matching snippet formulae exactly) ─────────────
-    v_nom   = spec["v"]
-    c_nom   = spec["c"]
-    v_pack  = S * v_nom                       # Total Pack Voltage
-    c_pack  = P * c_nom                       # Total Pack Capacity
-    e_kwh   = (v_pack * c_pack) / 1000.0      # Pack Energy kWh
-    mass_kg = (S * P * 0.070) * 1.25          # Estimated Mass  (70 g/cell + casing)
-    cost_us = (S * P * 3.50) * 1.30           # Estimated BOM Cost
-    wh_kg   = (e_kwh * 1000.0) / mass_kg      # Gravimetric Energy Density
+    # ── Real-Time Engineering Calculations ──────────────────────────────
+    v_cell = 3.7 if "NMC811" in chem else (3.2 if "LFP" in chem else 2.3)
+    ah_cell = 2.5 if "NMC811" in chem else (3.2 if "LFP" in chem else 1.5)
+
+    v_pack = ns * v_cell
+    cap_pack = np_cells * ah_cell
+    energy_kwh = (v_pack * cap_pack) / 1000.0
+    est_mass_kg = (ns * np_cells * 0.070) * 1.3  # 70g cell + 30% packaging overhead
+    est_cost_usd = (ns * np_cells * 3.50) * 1.25
+    wh_kg = (energy_kwh * 1000.0) / est_mass_kg if est_mass_kg > 0 else 0.0
+
+    # Downstream compatibility aliases
+    e_kwh = energy_kwh
+    mass_kg = est_mass_kg
+    cost_us = est_cost_usd
 
     with col2:
         with st.container(border=True):
             st.markdown("#### 📊 Real-Time Sizing Metrics")
 
-            # Row 1
-            st.metric("Total Pack Voltage",     f"{v_pack:.1f} V",
-                      delta=f"{S} × {v_nom} V nom")
-            st.metric("Pack Energy Capacity",   f"{e_kwh:.2f} kWh",
-                      delta=f"{e_kwh * 1000:.1f} Wh")
-            st.metric("Estimated Pack Mass",    f"{mass_kg:.2f} kg",
-                      delta="1.25× enclosure factor", delta_color="off")
-            st.metric("Estimated Pack BOM Cost",f"${cost_us:.2f}",
-                      delta="1.30× BOM factor",       delta_color="off")
-            st.metric("Gravimetric Density",    f"{wh_kg:.1f} Wh/kg",
-                      delta=cooling)
+            m1, m2 = st.columns(2)
+            m1.metric("Pack Voltage", f"{v_pack:.1f} V", delta=f"{ns} × {v_cell:.1f} V nom")
+            m2.metric("Pack Capacity", f"{cap_pack:.1f} Ah", delta=f"{np_cells} × {ah_cell:.1f} Ah unit")
+
+            st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+
+            m3, m4 = st.columns(2)
+            m3.metric("Pack Energy", f"{energy_kwh:.2f} kWh", delta=f"{energy_kwh * 1000:.1f} Wh total")
+            m4.metric("Est. Mass", f"{est_mass_kg:.1f} kg", delta="1.30× Packaging Overhead", delta_color="off")
+
+            st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+
+            m5, m6 = st.columns(2)
+            m5.metric("Estimated Pack BOM Cost", f"${est_cost_usd:,.2f}", delta="1.25× Cost Factor", delta_color="off")
+            m6.metric("Gravimetric Density", f"{wh_kg:.1f} Wh/kg", delta=cooling)
 
             st.markdown("---")
             st.markdown(
@@ -618,22 +639,73 @@ with tab_cfg:
                                          color:var(--text-secondary);">
                     <b style="color:var(--text-muted);font-size:.7rem;
                                text-transform:uppercase;">Formulations</b><br>
-                    V<sub>pack</sub> = S &times; V<sub>nom</sub>
-                        = {S} &times; {v_nom} =
+                    V<sub>pack</sub> = Ns &times; V<sub>cell</sub>
+                        = {ns} &times; {v_cell} =
                         <b style="color:var(--cyan);">{v_pack:.1f} V</b><br>
-                    C<sub>pack</sub> = P &times; C<sub>cell</sub>
-                        = {P} &times; {c_nom} =
-                        <b style="color:var(--cyan);">{c_pack:.1f} Ah</b><br>
-                    E<sub>kWh</sub> = (V<sub>pack</sub> &times; C<sub>pack</sub>) / 1000
-                        = <b style="color:var(--green);">{e_kwh:.3f} kWh</b><br>
-                    M = (S &times; P &times; 0.070) &times; 1.25
-                        = <b style="color:var(--text-primary);">{mass_kg:.2f} kg</b><br>
-                    Cost = (S &times; P &times; $3.50) &times; 1.30
-                        = <b style="color:var(--text-primary);">${cost_us:,.2f}</b>
+                    Cap<sub>pack</sub> = Np &times; Ah<sub>cell</sub>
+                        = {np_cells} &times; {ah_cell} =
+                        <b style="color:var(--cyan);">{cap_pack:.1f} Ah</b><br>
+                    Energy<sub>kWh</sub> = (V<sub>pack</sub> &times; Cap<sub>pack</sub>) / 1000
+                        = <b style="color:var(--green);">{energy_kwh:.2f} kWh</b><br>
+                    Mass (kg) = (Ns &times; Np &times; 0.070) &times; 1.30
+                        = <b style="color:var(--text-primary);">{est_mass_kg:.1f} kg</b><br>
+                    Cost = (Ns &times; Np &times; $3.50) &times; 1.25
+                        = <b style="color:var(--text-primary);">${est_cost_usd:,.2f}</b>
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
+
+    st.markdown("<div style='height: 16px;'></div>", unsafe_allow_html=True)
+
+    # ── Multi-Factor Second-Life Battery Grading Console ────────────────
+    with st.container(border=True):
+        st.markdown("#### ♻️ Multi-Factor Second-Life Battery Grading & Circular Economy")
+        st.caption("Automated lifecycle re-certification rules based on capacity retention (SOH), impedance growth (ΔR), and cell voltage imbalance (ΔV).")
+
+        sl_col1, sl_col2, sl_col3 = st.columns(3)
+        with sl_col1:
+            eval_soh = st.slider("Battery State of Health (SOH %)", min_value=40.0, max_value=100.0, value=82.5, step=0.5,
+                                 help="Current state of health capacity retention percentage.")
+        with sl_col2:
+            eval_delta_r = st.slider("Internal Resistance Rise ΔR (mΩ)", min_value=0.0, max_value=40.0, value=6.5, step=0.5,
+                                     help="Growth in internal cell ESR compared to beginning of life (BOL).")
+        with sl_col3:
+            eval_imbalance_mv = st.slider("Cell-to-Cell Imbalance ΔV (mV)", min_value=0, max_value=80, value=14, step=1,
+                                          help="Maximum voltage difference between cells in the pack in millivolts.")
+
+        certification_result = grade_second_life(eval_soh, eval_delta_r, eval_imbalance_mv)
+
+        if "1st-Life" in certification_result:
+            grade_color = "var(--green)"
+            grade_icon = "🚗"
+            grade_badge = "TIER 1 • AUTOMOTIVE TRACTION"
+            grade_desc = "Optimal state of health and low internal resistance. Fully certified for demanding high-voltage EV road traction and dynamic regenerative acceleration."
+            st.success(f"{grade_icon} **{certification_result}** — {grade_badge}")
+        elif "2nd-Life" in certification_result:
+            grade_color = "var(--amber)"
+            grade_icon = "🔋"
+            grade_badge = "TIER 2 • STATIONARY BESS STORAGE"
+            grade_desc = "Capacity or impedance has degraded beyond high-C-rate automotive specs, but remains ideal for stationary grid storage, solar PV buffering, and commercial microgrids."
+            st.warning(f"{grade_icon} **{certification_result}** — {grade_badge}")
+        else:
+            grade_color = "var(--red)"
+            grade_icon = "♻️"
+            grade_badge = "TIER 3 • RECYCLING & MATERIAL HARVESTING"
+            grade_desc = "Substantial cell degradation, elevated impedance, or unsafe cell imbalance detected. Battery should be retired from service and routed for hydrometallurgical material recovery (Lithium, Nickel, Cobalt, Copper recycling)."
+            st.error(f"{grade_icon} **{certification_result}** — {grade_badge}")
+
+        st.markdown(
+            f"""
+            <div style="background: var(--bg-card-sub); border-left: 4px solid {grade_color}; border-radius: 8px; padding: 10px 14px; font-size: 0.83rem; color: var(--text-secondary); line-height: 1.5;">
+                <b>Certification Assessment:</b> {grade_desc}<br>
+                <span style="font-family: 'JetBrains Mono', monospace; font-size: 0.76rem; color: var(--text-muted);">
+                    Evaluated: SOH = {eval_soh:.1f}% | ΔR = {eval_delta_r:.1f} mΩ | ΔV Imbalance = {eval_imbalance_mv} mV
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  TAB 3 — MULTI-PHYSICS TRADE-OFFS                                       ║
